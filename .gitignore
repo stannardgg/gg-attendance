@@ -1,0 +1,50 @@
+# ---- 数据集（198MB，不入库，本地标定用）----
+Cleaned_CASIA_FaceV5/
+
+# ---- Java ----
+target/
+*.class
+*.jar
+!.mvn/wrapper/maven-wrapper.jar
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+
+# ---- Node ----
+node_modules/
+dist/
+.vite/
+*.local
+
+# ---- IDE / OS ----
+.idea/
+.vscode/
+.DS_Store
+*.iml
+
+# ---- 工具链工作目录（含对话记忆，属本机状态，不入库）----
+.workbuddy/
+
+# ---- 运行时 ----
+.env
+.env.*
+!.env.example
+logs/
+*.log
+uploads/
+*.db
+*.sqlite
+data/
+minio-data/
+
+# ---- 人脸模型权重（体积大，按需下载，见项目文档 10.1）----
+*.onnx
+*.pt
+models/*.onnx
+!models/README.md
