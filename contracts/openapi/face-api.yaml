@@ -16,9 +16,13 @@ info:
     3. 失败响应必须带 `rejectGate`，否则 §13.2 的「误拒率 ≤5%」无法归因。
   license:
     name: 内部项目
+    url: https://github.com/stannardgg/gg-attendance
 servers:
   - url: /
     description: 经 nginx 反代
+
+security:
+  - ticketAuth: []
 
 tags:
   - name: health
@@ -51,8 +55,6 @@ paths:
 
         响应返回后，前端必须在**同一帧**渲染指令并开始采集，中间不得插入等待动画（§4.4.3）。
       operationId: challengeStart
-      parameters:
-        - $ref: '#/components/parameters/TicketAuth'
       requestBody:
         required: true
         content:
@@ -83,7 +85,6 @@ paths:
         无脸：连续 3 帧才判 `FA-4001`，单帧不判。
       operationId: challengeFrame
       parameters:
-        - $ref: '#/components/parameters/TicketAuth'
         - name: id
           in: path
           required: true
@@ -136,7 +137,6 @@ paths:
         `Redis SETNX` 保证同一 challenge 只提交一次；并发 finish 只有一次能拿到结果。
       operationId: challengeFinish
       parameters:
-        - $ref: '#/components/parameters/TicketAuth'
         - name: id
           in: path
           required: true
@@ -168,6 +168,8 @@ paths:
         不达标的样本**不返回 4xx**，而是 `passed=false` + `reasons[]`，
         让前端能逐条告诉学生"往亮处站一点"而不是"采集失败"。
       operationId: enrollSample
+      security:
+        - studentJwt: []
       requestBody:
         required: true
         content:
@@ -193,21 +195,14 @@ components:
     ticketAuth:
       type: http
       scheme: bearer
-      bearerFormat: checkinTicket
-      description: Java 签发的短期票据，非 JWT
-
-  parameters:
-    TicketAuth:
-      name: Authorization
-      in: header
-      required: true
-      description: '`Bearer <checkinTicket>`'
-      schema: { type: string }
-    InternalToken:
-      name: X-Internal-Token
-      in: header
-      required: true
-      schema: { type: string }
+      description: |
+        `checkinTicket`，Java 签发，TTL 60 秒，绑定 `(sessionId, studentId, ticketJti)`。
+        **不是 JWT**，不能自行构造——服务端按 Redis 里的票据记录校验。
+    studentJwt:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: 学生登录后拿到的 accessToken，仅用于 `/enroll/sample`
 
   responses:
     BadRequest:
