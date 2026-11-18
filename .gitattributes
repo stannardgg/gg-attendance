@@ -1,0 +1,24 @@
+# 统一换行，避免 Windows / macOS 协作时整文件 diff
+* text=auto eol=lf
+
+# 脚本必须保留各自平台的换行
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+*.sh  text eol=lf
+
+# 二进制，禁止行尾转换与文本 diff
+*.onnx binary
+*.pt   binary
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.gif  binary
+*.ico  binary
+*.woff binary
+*.woff2 binary
+*.y4m  binary
+
+# 语言统计
+*.java linguist-language=Java
+*.vue  linguist-language=Vue

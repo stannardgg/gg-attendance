@@ -1,0 +1,141 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # 先探测仓库里有哪些技术栈，再决定跑哪些 job。
+  # 好处：B0 阶段（还没有业务代码）CI 也是绿的，不会一上来就红灯吓人。
+  detect:
+    name: 检测技术栈
+    runs-on: ubuntu-latest
+    outputs:
+      java: ${{ steps.d.outputs.java }}
+      python: ${{ steps.d.outputs.python }}
+      node: ${{ steps.d.outputs.node }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: d
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f backend-java/pom.xml ]; then echo "java=true" >> "$GITHUB_OUTPUT"; else echo "java=false" >> "$GITHUB_OUTPUT"; fi
+          if [ -f face-service-python/pyproject.toml ] || [ -f face-service-python/requirements.txt ] || [ -f agent-service/pyproject.toml ] || [ -f agent-service/requirements.txt ]; then
+            echo "python=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "python=false" >> "$GITHUB_OUTPUT"
+          fi
+          if [ -f admin-web/package.json ] || [ -f mobile-web/package.json ]; then echo "node=true" >> "$GITHUB_OUTPUT"; else echo "node=false" >> "$GITHUB_OUTPUT"; fi
+
+  # 仓库卫生：不依赖任何语言工具链，任何时候都能跑，也最容易被忽略。
+  hygiene:
+    name: 仓库卫生
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 禁止入库的文件（密钥 / 模型 / 数据集 / 数据库）
+        shell: bash
+        run: |
+          set -euo pipefail
+          bad=$(git ls-files | grep -iE '(^|/)\.env$|\.env\.(local|prod|dev)$|\.onnx$|\.pt$|^Cleaned_CASIA_FaceV5/|\.(db|sqlite)$' || true)
+          if [ -n "$bad" ]; then
+            echo "::error::以下文件不应进入版本库，请加入 .gitignore 并 git rm --cached："
+            echo "$bad"
+            exit 1
+          fi
+          echo "OK：未发现敏感文件"
+
+      - name: 每个模块目录必须有 README.md
+        shell: bash
+        run: |
+          set -euo pipefail
+          fail=0
+          for d in backend-java face-service-python agent-service admin-web mobile-web deploy contracts; do
+            [ -d "$d" ] || continue
+            if [ ! -f "$d/README.md" ]; then
+              echo "::error::$d 缺少 README.md（说明该目录职责）"
+              fail=1
+            fi
+          done
+          exit $fail
+
+      # 「course 表不得出现 class_id」这类契约红线检查，由 B1 交付的
+      # contracts/scripts/check-contract.sh 承担（B1 完成后在此处调用）。
+
+  java:
+    name: Java 编译与单测
+    needs: detect
+    if: needs.detect.outputs.java == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: maven
+      - name: mvn verify
+        run: mvn -B -ntp -f backend-java/pom.xml verify
+
+  python:
+    name: Python 静态检查与单测
+    needs: detect
+    if: needs.detect.outputs.python == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: 逐个服务检查
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install -U pip
+          for p in face-service-python agent-service; do
+            [ -d "$p" ] || continue
+            if [ ! -f "$p/pyproject.toml" ] && [ ! -f "$p/requirements.txt" ]; then continue; fi
+            echo "::group::$p"
+            if [ -f "$p/requirements.txt" ]; then python -m pip install -r "$p/requirements.txt"; fi
+            if [ -f "$p/pyproject.toml" ]; then python -m pip install -e "$p"; fi
+            python -m pip install ruff pytest
+            if [ -f "$p/pyproject.toml" ]; then ruff check "$p" || true; fi
+            if [ -d "$p/tests" ]; then pytest -q "$p/tests"; fi
+            echo "::endgroup::"
+          done
+
+  node:
+    name: 前端构建
+    needs: detect
+    if: needs.detect.outputs.node == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: 逐个前端构建
+        shell: bash
+        run: |
+          set -euo pipefail
+          for d in admin-web mobile-web; do
+            [ -f "$d/package.json" ] || continue
+            echo "::group::$d"
+            cd "$d"
+            if [ -f package-lock.json ]; then npm ci; else npm install; fi
+            npm run build --if-present
+            npm test --if-present
+            cd ..
+            echo "::endgroup::"
+          done
