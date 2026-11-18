@@ -1,0 +1,2 @@
+DB_PASSWORD=Zx9Kp2Lm4Qr7Tv1Wn6Yb3Hc8Jd5Fg0As
+api_secret = "8f3a9c2e7b1d4f6a8c0e2b4d6f8a1c3e5b7d9f0a2c4e6b8d"
