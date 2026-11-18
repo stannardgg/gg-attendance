@@ -70,8 +70,66 @@ jobs:
           done
           exit $fail
 
-      # 「course 表不得出现 class_id」这类契约红线检查，由 B1 交付的
-      # contracts/scripts/check-contract.sh 承担（B1 完成后在此处调用）。
+      # 契约红线（course 表不得出现 class_id 等）由下面的 contract job 承担。
+
+  # 契约校验：三份 OpenAPI + Agent 工具定义 + 数据库结构。
+  # 这一组不依赖业务代码是否存在，属于"地基有没有歪"的检查，任何一次改动都要过。
+  contract:
+    name: 契约校验
+    runs-on: ubuntu-latest
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: gate
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -uroot -pgate --silent"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: 校验 OpenAPI（java-api / face-api / internal）
+        shell: bash
+        run: |
+          set -euo pipefail
+          for f in contracts/openapi/java-api.yaml contracts/openapi/face-api.yaml contracts/openapi/internal.yaml; do
+            echo "::group::$f"
+            npx --yes @openapitools/openapi-generator-cli@2 validate -i "$f"
+            echo "::endgroup::"
+          done
+
+      - name: 校验 Agent 工具契约
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install --quiet pyyaml
+          python contracts/scripts/check-agent-tools.py
+
+      - name: 空库建表 + 契约断言（D7 班级与课程解耦）
+        shell: bash
+        run: |
+          set -euo pipefail
+          mysql -h127.0.0.1 -P3306 -uroot -pgate -e "CREATE DATABASE face_gate DEFAULT CHARSET utf8mb4;"
+          mysql -h127.0.0.1 -P3306 -uroot -pgate face_gate < db/migration/V1__schema.sql
+          MYSQL_HOST=127.0.0.1 MYSQL_PORT=3306 MYSQL_USER=root MYSQL_PASSWORD=gate MYSQL_DATABASE=face_gate \
+            ./contracts/scripts/check-contract.sh
 
   java:
     name: Java 编译与单测
