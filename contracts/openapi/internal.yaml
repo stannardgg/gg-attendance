@@ -1,0 +1,423 @@
+openapi: 3.0.3
+info:
+  title: 人脸签到系统 · Java 内部接口
+  version: 1.0.0
+  description: |
+    `/internal/**`，**不对公网暴露**，仅容器网络可达。鉴权用 `X-Internal-Token`（常量时间比较）。
+
+    两类消费方：
+    - Python 人脸服务：`/sessions/{id}/context`、`/checkin/commit`
+    - Agent 服务：`/agent/tools/**`（两阶段写接口）
+
+    **单一写入口原则**：业务数据只有 Java 能写。Python 只提交判定结果，
+    Agent 的写操作也必须经这里的 `confirmToken` 流程落库（§1.2、§2.2 D8）。
+  license:
+    name: 内部项目
+servers:
+  - url: /
+    description: 容器网络，不对外
+
+tags:
+  - name: face-internal
+    description: 供 Python 人脸服务调用
+  - name: agent-internal
+    description: 供 Agent 服务调用
+
+security:
+  - internalToken: []
+
+paths:
+  /internal/sessions/{id}/context:
+    get:
+      tags: [face-internal]
+      summary: 会话上下文（Python 侧缓存 10 秒）
+      description: |
+        返回会话状态、时间窗、**班级与课程两个独立字段**、以及该学生是否属于本次班级。
+        Python 用它在 `start` 时快速拒绝不该签到的人，避免白跑一次采集。
+      operationId: internalSessionContext
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer, format: int64 }
+        - name: studentId
+          in: query
+          required: true
+          schema: { type: integer, format: int64 }
+      responses:
+        '200':
+          description: 上下文
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SessionContextResp' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /internal/checkin/commit:
+    post:
+      tags: [face-internal]
+      summary: 提交签到结果（幂等键 sessionId + studentId）
+      description: |
+        由 Python 在三道门禁全部通过后调用。Java 在**同一事务**内写 `attendance` + 审计，
+        再通过 WebSocket 推 `EVT_CHECKIN_SUCCESS` 给教师端。
+
+        幂等：`uk_att_session_student` 冲突时捕获 `DuplicateKeyException` 并返回 `FA-3003`，
+        **不是** 500。并发两次 commit 只有一次成功。
+      operationId: internalCheckinCommit
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CheckinCommitReq' }
+      responses:
+        '200':
+          description: 已落库
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CheckinCommitResp' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /internal/agent/tools/catalog:
+    get:
+      tags: [agent-internal]
+      summary: 当前用户可用的工具清单
+      description: |
+        Agent 启动/每轮对话时拉取，按 `level` 过滤后动态装配工具集。
+        工具目录由 Java 下发，**Agent 无法自行扩权**（§13.4）。
+      operationId: internalToolCatalog
+      parameters:
+        - name: userId
+          in: query
+          required: true
+          schema: { type: integer, format: int64 }
+        - name: X-User-Token
+          in: header
+          required: true
+          description: 终端用户的 JWT，用于解析角色与数据范围
+          schema: { type: string }
+      responses:
+        '200':
+          description: 工具清单
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ToolCatalogResp' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  /internal/agent/tools/{tool}:
+    post:
+      tags: [agent-internal]
+      summary: 两阶段写接口（无令牌返预览，有令牌则执行）
+      description: |
+        **同一个端点承担三个阶段**，靠请求体里有没有 `confirmToken` 区分：
+
+        1. **不带 `confirmToken`** → 校验角色与数据范围，构造 preview，
+           签发 60 秒一次性令牌（绑定 `paramsHash`），返回 `requiresConfirm=true` + `FA-6001`。
+           此时**数据库没有任何变更**。
+        2. **带 `confirmToken`** → 重算 `paramsHash` 与令牌绑定的比对，一致才执行，
+           写 `agent_action_log`，返回结果。
+
+        这五道闸缺一不可：授权 → 预览 → 确认 → 令牌 → 留痕撤销（§11.5）。
+        **Agent 不得绕过本端点直接调 Service。**
+      operationId: internalAgentTool
+      parameters:
+        - name: tool
+          in: path
+          required: true
+          description: 工具名，如 create_session / close_session / mark_leave
+          schema: { type: string }
+        - name: X-User-Token
+          in: header
+          required: true
+          description: 终端用户的 JWT；服务端据此做数据范围过滤，**不信任请求体里的 userId**
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AgentToolReq' }
+      responses:
+        '200':
+          description: 预览已生成（requiresConfirm=true）或执行完成（requiresConfirm=false）
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AgentToolResp' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '403':
+          description: 超出授权范围（FA-6004）。**此情形不得返回 preview**
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResult' }
+        '409': { $ref: '#/components/responses/Conflict' }
+      x-error-codes: [FA-6001, FA-6002, FA-6003, FA-6004, FA-6005]
+
+  /internal/agent/actions/{id}/undo:
+    post:
+      tags: [agent-internal]
+      summary: 撤销一次 Agent 写操作（默认 30 分钟内）
+      description: |
+        撤销本身也是一次写操作：回滚数据 + 写一条新的 `agent_action_log`
+        （`undone_log_id` 指回原记录），因此一次「执行 + 撤销」在库里留下**两条**记录。
+      operationId: internalAgentUndo
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer, format: int64 }
+        - name: X-User-Token
+          in: header
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: 已撤销
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AgentToolResp' }
+        '400':
+          description: 超过撤销窗口或该操作不支持撤销（FA-6005）
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResult' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+components:
+  securitySchemes:
+    internalToken:
+      type: apiKey
+      in: header
+      name: X-Internal-Token
+      description: 常量时间比较；缺失或不匹配一律 401
+
+  responses:
+    Unauthorized:
+      description: 内部令牌错误
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResult' }
+    Forbidden:
+      description: 超出数据范围
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResult' }
+    NotFound:
+      description: 资源不存在
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResult' }
+    BadRequest:
+      description: 参数错误
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResult' }
+    Conflict:
+      description: 状态冲突（重复签到 FA-3003 / 令牌失效 FA-6002 / 参数变更 FA-6003）
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResult' }
+
+  schemas:
+    Result:
+      type: object
+      required: [code, message, traceId]
+      properties:
+        code: { type: string, pattern: '^FA-\d{4}$' }
+        message: { type: string }
+        traceId: { type: string }
+
+    ErrorResult:
+      allOf:
+        - $ref: '#/components/schemas/Result'
+        - type: object
+          properties:
+            data:
+              type: object
+              nullable: true
+
+    SessionContext:
+      type: object
+      properties:
+        sessionId: { type: integer, format: int64 }
+        title: { type: string }
+        status: { type: string, enum: [ACTIVE, CLOSED, CANCELLED] }
+        startAt: { type: string, format: date-time }
+        endAt: { type: string, format: date-time }
+        lateAfterSec: { type: integer }
+        classId: { type: integer, format: int64, description: '★ 独立字段' }
+        className: { type: string }
+        courseId: { type: integer, format: int64, description: '★ 独立字段；与 classId 无业务关联' }
+        courseName: { type: string }
+        studentId: { type: integer, format: int64 }
+        studentName: { type: string }
+        inClass: { type: boolean, description: 学生是否属于本会话班级（决定能否签到） }
+        faceStatus: { type: string, enum: [NONE, PENDING_REVIEW, ACTIVE, REJECTED] }
+        alreadyCheckedIn: { type: boolean }
+        retryLeft: { type: integer }
+
+    SessionContextResp:
+      allOf:
+        - $ref: '#/components/schemas/Result'
+        - type: object
+          properties:
+            data: { $ref: '#/components/schemas/SessionContext' }
+
+    CheckinCommitReq:
+      type: object
+      additionalProperties: false
+      required:
+        - sessionId
+        - studentId
+        - jti
+        - similarity
+        - livenessMedian
+        - identitySim
+        - actionSeq
+        - actionCount
+      properties:
+        sessionId: { type: integer, format: int64 }
+        studentId: { type: integer, format: int64 }
+        jti:
+          type: string
+          description: 票据 jti，用于校验这张票就是当初签给这个学生的，防重放
+        similarity: { type: number, format: double, minimum: 0, maximum: 1 }
+        livenessMedian: { type: number, format: double, minimum: 0, maximum: 1 }
+        identitySim: { type: number, format: double, minimum: 0, maximum: 1 }
+        actionSeq: { type: string, enum: [MOUTH_ONCE, MOUTH_TWICE] }
+        actionCount: { type: integer, minimum: 0, maximum: 5 }
+        matchedVectorId: { type: integer, format: int64, nullable: true }
+        snapshotRef: { type: string, maxLength: 255, nullable: true }
+        deviceHash: { type: string, maxLength: 64, nullable: true }
+
+    CheckinCommitData:
+      type: object
+      properties:
+        attendanceId: { type: integer, format: int64 }
+        status: { type: string, enum: [PRESENT, LATE] }
+        checkinAt: { type: string, format: date-time }
+
+    CheckinCommitResp:
+      allOf:
+        - $ref: '#/components/schemas/Result'
+        - type: object
+          properties:
+            data: { $ref: '#/components/schemas/CheckinCommitData' }
+
+    ToolCatalogItem:
+      type: object
+      properties:
+        name: { type: string, example: get_attendance_status }
+        level:
+          type: string
+          enum: [L0, L1, L2, L3]
+        title: { type: string }
+        description: { type: string }
+        requiresConfirm: { type: boolean, description: L2/L3 恒为 true }
+        undoable: { type: boolean }
+        paramsSchema: { type: object, description: 内联的 JSON Schema }
+        returnsSchema: { type: object }
+
+    ToolCatalogData:
+      type: object
+      properties:
+        level:
+          type: object
+          description: 当前用户实际生效的能力级别开关
+          properties:
+            L0: { type: boolean }
+            L1: { type: boolean }
+            L2: { type: boolean }
+            L3: { type: boolean }
+        scope:
+          type: object
+          properties:
+            classIds: { type: array, items: { type: integer, format: int64 } }
+            courseIds: { type: array, items: { type: integer, format: int64 } }
+        tools: { type: array, items: { $ref: '#/components/schemas/ToolCatalogItem' } }
+
+    ToolCatalogResp:
+      allOf:
+        - $ref: '#/components/schemas/Result'
+        - type: object
+          properties:
+            data: { $ref: '#/components/schemas/ToolCatalogData' }
+
+    AgentToolReq:
+      type: object
+      additionalProperties: false
+      required: [params]
+      properties:
+        params:
+          type: object
+          description: 工具入参。字段由 catalog 下发的 paramsSchema 约束
+        confirmToken:
+          type: string
+          nullable: true
+          description: |
+            第一阶段不传；第二阶段原样回传。
+            **Agent 不得自行构造或猜测** —— 服务端只认自己签发的那一个（§11.5）
+        toolCallId:
+          type: string
+          nullable: true
+          description: Agent 侧幂等键；重复恢复同一个断点不会重复执行
+
+    PreviewFieldDiff:
+      type: object
+      required: [field, before, after]
+      properties:
+        field: { type: string }
+        label: { type: string, description: 中文字段名，直接给确认卡展示 }
+        before: { nullable: true }
+        after: { nullable: true }
+
+    ActionPreview:
+      type: object
+      description: 确认卡要渲染的全部内容（少一项即不合格，§11.5）
+      required: [actionLabel, affectedCount, undoable]
+      properties:
+        actionLabel:
+          type: string
+          description: 中文动作描述，不是工具名。例："发起一场签到"
+        resourceLabel:
+          type: string
+          description: 影响的资源，例："计算机 2024 级 1 班 × 高等数学（上）"
+        affectedCount: { type: integer }
+        affectedSummary:
+          type: string
+          description: 例："将把 3 名学生的状态改为 PRESENT"
+        fieldDiffs:
+          type: array
+          items: { $ref: '#/components/schemas/PreviewFieldDiff' }
+        undoable: { type: boolean }
+        undoableUntil: { type: string, format: date-time, nullable: true }
+        irreversibleHint:
+          type: string
+          nullable: true
+          description: 不可撤销时必须说明后果
+
+    AgentToolData:
+      type: object
+      properties:
+        requiresConfirm: { type: boolean }
+        preview: { $ref: '#/components/schemas/ActionPreview' }
+        confirmToken:
+          type: string
+          nullable: true
+          description: 仅 requiresConfirm=true 时返回；60 秒一次性，绑定 paramsHash
+        expiresAt: { type: string, format: date-time, nullable: true }
+        result:
+          type: object
+          nullable: true
+          description: 执行完成后返回的业务结果
+        actionLogId:
+          type: integer
+          format: int64
+          nullable: true
+          description: 执行时写的 agent_action_log.id，撤销要用它
+
+    AgentToolResp:
+      allOf:
+        - $ref: '#/components/schemas/Result'
+        - type: object
+          properties:
+            data: { $ref: '#/components/schemas/AgentToolData' }

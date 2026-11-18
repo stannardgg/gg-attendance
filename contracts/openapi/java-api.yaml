@@ -1,0 +1,2074 @@
+openapi: 3.0.3
+info:
+  title: 人脸签到系统 · Java 业务接口
+  version: 1.0.0
+  description: |
+    覆盖 `/api/v1/auth/**`、`/api/v1/mobile/**`、`/api/v1/admin/**` 三组端点。
+
+    **三条契约红线**
+    1. `course` 的任何 DTO 都不得出现 `classId`（D7）。请求体一律 `additionalProperties: false`，
+       带未知字段直接 400 —— 这是「课程表单提交 classId 必须被拒」的契约级保证。
+    2. `POST /admin/sessions` 必须同时含 `classId` 与 `courseId`，缺一即 `FA-2001`。
+    3. 响应体统一 `{code, message, data, traceId}`，前端只按 `code` 分支。
+
+    **鉴权**：除 `/auth/**` 外均为 JWT Bearer。数据范围由服务端按 `teacher_scope` 强制注入，
+    前端隐藏菜单不构成安全边界（§8.3）。
+  license:
+    name: 内部项目
+servers:
+  - url: /
+    description: 经 nginx 反代，与前端同源
+
+tags:
+  - name: auth
+    description: 认证与账号（无需鉴权，除 me/logout）
+  - name: mobile
+    description: 学生移动端，响应永不包含其他学生信息
+  - name: admin-class
+    description: 班级管理（独立主数据，与课程无关联）
+  - name: admin-course
+    description: 课程管理（独立主数据，不含任何班级信息）
+  - name: admin-org
+    description: 学生、教师、教师授权范围
+  - name: admin-session
+    description: 签到会话与二维码
+  - name: admin-attendance
+    description: 考勤查询与调整
+  - name: admin-appeal
+    description: 申诉处理
+  - name: admin-system
+    description: 统计、审计、系统配置
+
+security:
+  - bearerAuth: []
+
+paths:
+  # ===================================================================
+  # auth
+  # ===================================================================
+  /api/v1/auth/login:
+    post:
+      tags: [auth]
+      summary: 登录
+      security: []
+      operationId: login
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/LoginReq' }
+      responses:
+        '200':
+          description: 登录成功
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LoginResp' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+      x-error-codes: [FA-1001, FA-1002]
+
+  /api/v1/auth/refresh:
+    post:
+      tags: [auth]
+      summary: 用 refreshToken 换新的 accessToken
+      security: []
+      operationId: refresh
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [refreshToken]
+              properties:
+                refreshToken: { type: string }
+      responses:
+        '200':
+          description: 新令牌
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TokenResp' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+      x-error-codes: [FA-1002]
+
+  /api/v1/auth/logout:
+    post:
+      tags: [auth]
+      summary: 登出（把 jti 写入 Redis 黑名单，TTL = 剩余有效期）
+      operationId: logout
+      responses:
+        '200':
+          description: 已登出（幂等，重复调用同样返回成功）
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/EmptyResp' }
+
+  /api/v1/auth/student/activate:
+    post:
+      tags: [auth]
+      summary: 学生自助激活
+      description: |
+        `学号 + 姓名 + 班级邀请码` 三者同时匹配才能激活。任一不匹配返回**同一个**模糊提示，
+        不暴露「班级码不存在」与「学号不存在」的区别（§5.3.1，防探测）。
+      security: []
+      operationId: activateStudent
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/StudentActivateReq' }
+      responses:
+        '200':
+          description: 激活成功，直接返回令牌免二次登录
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TokenResp' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '409': { $ref: '#/components/responses/Conflict' }
+      x-error-codes: [FA-1001, FA-1004, FA-2001]
+
+  /api/v1/auth/me:
+    get:
+      tags: [auth]
+      summary: 当前用户、角色、权限点与数据范围
+      operationId: me
+      responses:
+        '200':
+          description: 当前用户
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MeResp' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+  # ===================================================================
+  # mobile
+  # ===================================================================
+  /api/v1/mobile/sessions/active:
+    get:
+      tags: [mobile]
+      summary: 本人所在班级正在进行的签到
+      operationId: mobileActiveSessions
+      responses:
+        '200':
+          description: 进行中的会话列表（含班级名与课程名，前端必须两者同显）
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ActiveSessionListResp' }
+
+  /api/v1/mobile/sessions/{sid}/join:
+    post:
+      tags: [mobile]
+      summary: 扫码后换取 checkinTicket
+      description: |
+        校验三件事：二维码 token（当前或前一 15s 窗口）、会话状态、**班级归属**
+        （`student.class_id == session.class_id`）。班级不符返回 `FA-3004`。
+        课程不参与校验 —— 应到名单只跟班级走（D7）。
+      operationId: joinSession
+      parameters:
+        - $ref: '#/components/parameters/PathSessionId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [qrToken]
+              properties:
+                qrToken: { type: string, minLength: 16, maxLength: 16 }
+      responses:
+        '200':
+          description: 票据已签发
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/JoinResp' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+      x-error-codes: [FA-3001, FA-3002, FA-3003, FA-3004, FA-3005, FA-4006]
+
+  /api/v1/mobile/attendance/{sid}:
+    get:
+      tags: [mobile]
+      summary: 本人在指定会话的签到状态
+      operationId: mobileAttendanceOfSession
+      parameters:
+        - $ref: '#/components/parameters/PathSessionId'
+      responses:
+        '200':
+          description: 状态
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MobileAttendanceResp' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/mobile/attendance/history:
+    get:
+      tags: [mobile]
+      summary: 本人签到历史
+      operationId: mobileAttendanceHistory
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/Size'
+        - name: status
+          in: query
+          schema: { $ref: '#/components/schemas/AttendanceStatus' }
+      responses:
+        '200':
+          description: 分页历史
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/MobileHistoryResp' }
+
+  /api/v1/mobile/face/enroll:
+    post:
+      tags: [mobile]
+      summary: 提交人脸采集样本，进入 PENDING_REVIEW
+      description: |
+        一次提交 5~10 张样本的引用键（图片本身已通过 `/face-api/enroll/sample` 逐张上传并完成质量校验）。
+        提交后 `face_profile.status` 转 `PENDING_REVIEW`，需教师审核通过才可变 `ACTIVE`（D5）。
+        调用前必须已记录「单独同意」（`account.face_consent_at`），否则 400（§13.4）。
+      operationId: enrollFace
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/FaceEnrollReq' }
+      responses:
+        '200':
+          description: 已提交审核
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/FaceStatusResp' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+      x-error-codes: [FA-4001, FA-4002]
+
+  /api/v1/mobile/face/status:
+    get:
+      tags: [mobile]
+      summary: 本人人脸档案状态
+      operationId: faceStatus
+      responses:
+        '200':
+          description: 状态
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/FaceStatusResp' }
+
+  /api/v1/mobile/appeals:
+    post:
+      tags: [mobile]
+      summary: 提交申诉
+      description: 仅 `ABSENT` 且会话 `allow_appeal=1` 时可提交；同一考勤记录只允许一条 PENDING。
+      operationId: createAppeal
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AppealCreateReq' }
+      responses:
+        '200':
+          description: 已提交
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AppealResp' }
+        '409': { $ref: '#/components/responses/Conflict' }
+      x-error-codes: [FA-5001]
+
+  /api/v1/mobile/appeals/{id}/withdraw:
+    post:
+      tags: [mobile]
+      summary: 撤回申诉（仅 PENDING）
+      operationId: withdrawAppeal
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: integer, format: int64 }
+      responses:
+        '200':
+          description: 已撤回
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AppealResp' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /api/v1/mobile/ws:
+    get:
+      tags: [mobile]
+      summary: WebSocket 订阅本人签到通知
+      description: |
+        `101 Switching Protocols`。浏览器 WS 无法设置请求头，故 JWT 走 query 参数 `?token=`。
+        订阅频道 `user:{userId}`，收到 `EVT_SESSION_STARTED` / `EVT_SESSION_CLOSED`。
+        **本端点不是普通 REST，OpenAPI 仅作登记，不参与代码生成。**
+      operationId: mobileWs
+      parameters:
+        - name: token
+          in: query
+          required: true
+          schema: { type: string }
+      responses:
+        '101':
+          description: 协议升级成功
+      x-websocket-events:
+        - EVT_SESSION_STARTED
+        - EVT_SESSION_CLOSED
+
+  # ===================================================================
+  # admin · 班级
+  # ===================================================================
+  /api/v1/admin/classes:
+    get:
+      tags: [admin-class]
+      summary: 班级列表
+      operationId: listClasses
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/Size'
+        - name: keyword
+          in: query
+          description: 匹配 name 或 code
+          schema: { type: string }
+        - name: grade
+          in: query
+          schema: { type: string }
+        - name: status
+          in: query
+          description: 默认只返回 ACTIVE；勾选「显示已归档」时传 ARCHIVED 或 ALL
+          schema: { type: string, enum: [ACTIVE, ARCHIVED, ALL], default: ACTIVE }
+      responses:
+        '200':
+          description: 分页列表
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ClassPageResp' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      tags: [admin-class]
+      summary: 新建班级
+      operationId: createClass
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ClassCreateReq' }
+      responses:
+        '200':
+          description: 已创建
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ClassResp' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '409': { $ref: '#/components/responses/Conflict' }
+      x-error-codes: [FA-2002, FA-2003]
+
+  /api/v1/admin/classes/{id}:
+    put:
+      tags: [admin-class]
+      summary: 编辑班级（code 不可改）
+      description: '请求体不得含 `code`，含则 400（additionalProperties=false 已保证）。'
+      operationId: updateClass
+      parameters:
+        - $ref: '#/components/parameters/PathId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ClassUpdateReq' }
+      responses:
+        '200':
+          description: 已保存
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ClassResp' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+      x-error-codes: [FA-2001, FA-2003]
+    delete:
+      tags: [admin-class]
+      summary: 删除或归档班级
+      description: |
+        班内仍有 `status=ACTIVE` 学生 → `FA-2005`（data 带 studentCount）；
+        已被任一签到会话引用 → 转为 `ARCHIVED`，不物理删除（§5.3.1）。
+      operationId: deleteClass
+      parameters:
+        - $ref: '#/components/parameters/PathId'
+      responses:
+        '200':
+          description: 已删除或已归档（data.archived 标明走了哪条路径）
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DeleteResultResp' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+      x-error-codes: [FA-2001, FA-2005]
+
+  # ===================================================================
+  # admin · 课程
+  # ===================================================================
+  /api/v1/admin/courses:
+    get:
+      tags: [admin-course]
+      summary: 课程列表
+      operationId: listCourses
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/Size'
+        - name: keyword
+          in: query
+          description: 匹配 name 或 code
+          schema: { type: string }
+        - name: semester
+          in: query
+          schema: { type: string }
+        - name: status
+          in: query
+          schema: { type: string, enum: [ACTIVE, ARCHIVED, ALL], default: ACTIVE }
+      responses:
+        '200':
+          description: 分页列表
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CoursePageResp' }
+    post:
+      tags: [admin-course]
+      summary: 新建课程（不得含 classId）
+      operationId: createCourse
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CourseCreateReq' }
+      responses:
+        '200':
+          description: 已创建
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CourseResp' }
+        '400':
+          description: 字段校验失败。带 `classId` 等未知字段时也走这里（契约红线，§16.3 场景 16）
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResult' }
+        '409': { $ref: '#/components/responses/Conflict' }
+      x-error-codes: [FA-2002]
+
+  /api/v1/admin/courses/{id}:
+    put:
+      tags: [admin-course]
+      summary: 编辑课程（code 不可改，不得含 classId）
+      operationId: updateCourse
+      parameters:
+        - $ref: '#/components/parameters/PathId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CourseUpdateReq' }
+      responses:
+        '200':
+          description: 已保存
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CourseResp' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+      x-error-codes: [FA-2001]
+    delete:
+      tags: [admin-course]
+      summary: 删除或归档课程
+      description: 已被任一签到会话引用 → 转 `ARCHIVED`，不物理删除。
+      operationId: deleteCourse
+      parameters:
+        - $ref: '#/components/parameters/PathId'
+      responses:
+        '200':
+          description: 已删除或已归档
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DeleteResultResp' }
+        '404': { $ref: '#/components/responses/NotFound' }
+      x-error-codes: [FA-2001]
+
+  # ===================================================================
+  # admin · 学生
+  # ===================================================================
+  /api/v1/admin/students:
+    get:
+      tags: [admin-org]
+      summary: 学生列表（按数据范围过滤）
+      operationId: listStudents
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/Size'
+        - name: classId
+          in: query
+          schema: { type: integer, format: int64 }
+        - name: keyword
+          in: query
+          description: 匹配 name 或 studentNo
+          schema: { type: string }
+        - name: status
+          in: query
+          schema: { $ref: '#/components/schemas/StudentStatus' }
+      responses:
+        '200':
+          description: 分页列表
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StudentPageResp' }
+    post:
+      tags: [admin-org]
+      summary: 新建学生
+      operationId: createStudent
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/StudentCreateReq' }
+      responses:
+        '200':
+          description: 已创建
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StudentResp' }
+        '409': { $ref: '#/components/responses/Conflict' }
+      x-error-codes: [FA-2002]
+
+  /api/v1/admin/students/{id}:
+    put:
+      tags: [admin-org]
+      summary: 编辑学生（含转班，转班写审计）
+      operationId: updateStudent
+      parameters:
+        - $ref: '#/components/parameters/PathId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/StudentUpdateReq' }
+      responses:
+        '200':
+          description: 已保存
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StudentResp' }
+        '404': { $ref: '#/components/responses/NotFound' }
+    delete:
+      tags: [admin-org]
+      summary: 删除学生（有考勤记录时转 ARCHIVED）
+      operationId: deleteStudent
+      parameters:
+        - $ref: '#/components/parameters/PathId'
+      responses:
+        '200':
+          description: 已删除或已归档
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/DeleteResultResp' }
+
+  /api/v1/admin/students/import:
+    post:
+      tags: [admin-org]
+      summary: CSV 批量导入学生
+      description: |
+        按 `classCode` 定位班级。逐行校验，**已成功的行不回滚**（分批提交）。
+        1000 行含 5 行非法 → 995 成功、5 行返回行号与原因（§14.3 WP-03）。
+      operationId: importStudents
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [file, classCode]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: 表头固定 studentNo,name；可选 status
+                classCode:
+                  type: string
+                  description: 班级邀请码；与 CSV 内的列同名冲突时以此为准
+      responses:
+        '200':
+          description: 逐行结果
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ImportResultResp' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+
+  /api/v1/admin/students/{id}/face/review:
+    post:
+      tags: [admin-org]
+      summary: 人脸采集审核
+      description: |
+        通过 → `face_profile.status=ACTIVE` 并把样本向量写入 `face_vector`；
+        驳回 → `REJECTED` 且必须带 `rejectReason`。仅 ACTIVE 允许签到（`FA-4006`）。
+      operationId: reviewFace
+      parameters:
+        - $ref: '#/components/parameters/PathId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/FaceReviewReq' }
+      responses:
+        '200':
+          description: 审核结果
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/FaceStatusResp' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  # ===================================================================
+  # admin · 教师与授权
+  # ===================================================================
+  /api/v1/admin/teachers:
+    get:
+      tags: [admin-org]
+      summary: 教师列表（仅 ADMIN）
+      operationId: listTeachers
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/Size'
+        - name: keyword
+          in: query
+          schema: { type: string }
+      responses:
+        '200':
+          description: 分页列表
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TeacherPageResp' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      tags: [admin-org]
+      summary: 新建教师（仅 ADMIN，角色固定 TEACHER，不接受 role 字段）
+      operationId: createTeacher
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TeacherCreateReq' }
+      responses:
+        '200':
+          description: 已创建
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TeacherResp' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+      x-error-codes: [FA-1003, FA-1005, FA-2002]
+
+  /api/v1/admin/teachers/{id}:
+    put:
+      tags: [admin-org]
+      summary: 编辑教师（仅 ADMIN）
+      operationId: updateTeacher
+      parameters:
+        - $ref: '#/components/parameters/PathId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/TeacherUpdateReq' }
+      responses:
+        '200':
+          description: 已保存
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/TeacherResp' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    delete:
+      tags: [admin-org]
+      summary: 删除教师（仅 ADMIN）
+      operationId: deleteTeacher
+      parameters:
+        - $ref: '#/components/parameters/PathId'
+      responses:
+        '200':
+          description: 已删除
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/EmptyResp' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /api/v1/admin/teacher-scopes:
+    get:
+      tags: [admin-org]
+      summary: 教师授权范围列表（仅 ADMIN）
+      operationId: listTeacherScopes
+      parameters:
+        - name: teacherId
+          in: query
+          schema: { type: integer, format: int64 }
+      responses:
+        '200':
+          description: 列表
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ScopeListResp' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      tags: [admin-org]
+      summary: 新增授权（仅 ADMIN）
+      operationId: createTeacherScope
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ScopeCreateReq' }
+      responses:
+        '200':
+          description: 已授权
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ScopeResp' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+
+  /api/v1/admin/teacher-scopes/{id}:
+    delete:
+      tags: [admin-org]
+      summary: 撤销授权（仅 ADMIN）
+      operationId: deleteTeacherScope
+      parameters:
+        - $ref: '#/components/parameters/PathId'
+      responses:
+        '200':
+          description: 已撤销
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/EmptyResp' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  # ===================================================================
+  # admin · 签到会话
+  # ===================================================================
+  /api/v1/admin/sessions:
+    get:
+      tags: [admin-session]
+      summary: 会话列表（班级 / 课程 / 时间三列展示）
+      operationId: listSessions
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/Size'
+        - name: classId
+          in: query
+          schema: { type: integer, format: int64 }
+        - name: courseId
+          in: query
+          schema: { type: integer, format: int64 }
+        - name: status
+          in: query
+          schema: { $ref: '#/components/schemas/SessionStatus' }
+        - name: dateFrom
+          in: query
+          schema: { type: string, format: date }
+        - name: dateTo
+          in: query
+          schema: { type: string, format: date }
+      responses:
+        '200':
+          description: 分页列表
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SessionPageResp' }
+    post:
+      tags: [admin-session]
+      summary: 发起签到（必须同时传 classId 与 courseId）
+      description: |
+        校验顺序：缺字段 → `FA-2001`；班级/课程不存在 → `FA-2001`；
+        未授权（未同时命中 teacher_scope 的 CLASS 与 COURSE）→ `FA-2006`；
+        已归档 → `FA-2004`。
+        创建时快照应到名单 = `students WHERE class_id=? AND status='ACTIVE'`，
+        写入 `expected_count` 供大屏展示，**与 courseId 无关**（D7）。
+      operationId: createSession
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/SessionCreateReq' }
+      responses:
+        '200':
+          description: 已发起
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SessionResp' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+      x-error-codes: [FA-2001, FA-2004, FA-2006]
+
+  /api/v1/admin/sessions/{id}/close:
+    post:
+      tags: [admin-session]
+      summary: 结束签到（未签到者补 ABSENT，幂等）
+      description: 只能结束自己发起的会话；重复调用返回同样的结果，不报错。
+      operationId: closeSession
+      parameters:
+        - $ref: '#/components/parameters/PathId'
+      responses:
+        '200':
+          description: 已关闭
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SessionResp' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+      x-error-codes: [FA-3001, FA-5002]
+
+  /api/v1/admin/sessions/{id}/rotate-qr:
+    post:
+      tags: [admin-session]
+      summary: 强制换码（qr_epoch += 1，旧码立即失效）
+      operationId: rotateQr
+      parameters:
+        - $ref: '#/components/parameters/PathId'
+      responses:
+        '200':
+          description: 新码
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/QrResp' }
+
+  /api/v1/admin/sessions/{id}/qrcode:
+    get:
+      tags: [admin-session]
+      summary: 取当前二维码 token（前端每 15 秒拉一次）
+      description: |
+        `token = Base32(HMAC-SHA256(SESSION_QR_SECRET, "{sessionId}|{qrEpoch}|{slice}"))[:16]`，
+        `slice = floor(epoch/15)`。返回 `qrUrl` 供大屏直接渲染二维码。
+      operationId: getQrCode
+      parameters:
+        - $ref: '#/components/parameters/PathId'
+      responses:
+        '200':
+          description: 当前码
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/QrResp' }
+
+  /api/v1/admin/sessions/{id}/live:
+    get:
+      tags: [admin-session]
+      summary: WebSocket 实时名单
+      description: |
+        `101 Switching Protocols`，JWT 走 query `?token=`。订阅 `session:{sessionId}`，
+        收到 `EVT_CHECKIN_SUCCESS` 增量推送。**登记用，不参与代码生成。**
+      operationId: sessionLiveWs
+      parameters:
+        - $ref: '#/components/parameters/PathId'
+        - name: token
+          in: query
+          required: true
+          schema: { type: string }
+      responses:
+        '101':
+          description: 协议升级成功
+      x-websocket-events: [EVT_CHECKIN_SUCCESS, EVT_SESSION_CLOSED]
+
+  # ===================================================================
+  # admin · 考勤
+  # ===================================================================
+  /api/v1/admin/attendance:
+    get:
+      tags: [admin-attendance]
+      summary: 考勤查询
+      operationId: listAttendance
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/Size'
+        - name: sessionId
+          in: query
+          schema: { type: integer, format: int64 }
+        - name: classId
+          in: query
+          schema: { type: integer, format: int64 }
+        - name: courseId
+          in: query
+          schema: { type: integer, format: int64 }
+        - name: status
+          in: query
+          schema: { $ref: '#/components/schemas/AttendanceStatus' }
+        - name: studentKeyword
+          in: query
+          schema: { type: string }
+        - name: dateFrom
+          in: query
+          schema: { type: string, format: date }
+        - name: dateTo
+          in: query
+          schema: { type: string, format: date }
+      responses:
+        '200':
+          description: 分页列表
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AttendancePageResp' }
+
+  /api/v1/admin/attendance/{id}:
+    patch:
+      tags: [admin-attendance]
+      summary: 手动改状态（必须带 adjustReason）
+      description: 用于标记请假 / 免签 / 纠正迟到。改动写 `adjusted_by`、`adjust_reason` 并留审计。
+      operationId: patchAttendance
+      parameters:
+        - $ref: '#/components/parameters/PathId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AttendancePatchReq' }
+      responses:
+        '200':
+          description: 已更新
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AttendanceResp' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  /api/v1/admin/attendance/export:
+    get:
+      tags: [admin-attendance]
+      summary: 导出 CSV
+      operationId: exportAttendance
+      parameters:
+        - name: sessionId
+          in: query
+          schema: { type: integer, format: int64 }
+        - name: classId
+          in: query
+          schema: { type: integer, format: int64 }
+        - name: courseId
+          in: query
+          schema: { type: integer, format: int64 }
+        - name: dateFrom
+          in: query
+          schema: { type: string, format: date }
+        - name: dateTo
+          in: query
+          schema: { type: string, format: date }
+      responses:
+        '200':
+          description: CSV 文件（UTF-8 BOM，Excel 直接可读）
+          content:
+            text/csv:
+              schema: { type: string }
+
+  # ===================================================================
+  # admin · 申诉
+  # ===================================================================
+  /api/v1/admin/appeals:
+    get:
+      tags: [admin-appeal]
+      summary: 申诉列表（默认 PENDING 优先）
+      operationId: listAppeals
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/Size'
+        - name: status
+          in: query
+          schema: { $ref: '#/components/schemas/AppealStatus' }
+        - name: classId
+          in: query
+          schema: { type: integer, format: int64 }
+        - name: courseId
+          in: query
+          schema: { type: integer, format: int64 }
+      responses:
+        '200':
+          description: 分页列表
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AppealPageResp' }
+
+  /api/v1/admin/appeals/{id}/handle:
+    post:
+      tags: [admin-appeal]
+      summary: 处理申诉（通过 → 考勤变 PRESENT，同一事务）
+      operationId: handleAppeal
+      parameters:
+        - $ref: '#/components/parameters/PathId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AppealHandleReq' }
+      responses:
+        '200':
+          description: 已处理
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AppealResp' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+      x-error-codes: [FA-5001, FA-5002]
+
+  # ===================================================================
+  # admin · 统计 / 审计 / 配置
+  # ===================================================================
+  /api/v1/admin/stats/overview:
+    get:
+      tags: [admin-system]
+      summary: 概览（班级与课程双维度下钻）
+      operationId: statsOverview
+      parameters:
+        - name: classId
+          in: query
+          schema: { type: integer, format: int64 }
+        - name: courseId
+          in: query
+          schema: { type: integer, format: int64 }
+        - name: dateFrom
+          in: query
+          schema: { type: string, format: date }
+        - name: dateTo
+          in: query
+          schema: { type: string, format: date }
+      responses:
+        '200':
+          description: 指标
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/OverviewResp' }
+
+  /api/v1/admin/audit-logs:
+    get:
+      tags: [admin-system]
+      summary: 审计查询（仅 ADMIN）
+      operationId: listAuditLogs
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/Size'
+        - name: actorId
+          in: query
+          schema: { type: integer, format: int64 }
+        - name: action
+          in: query
+          schema: { type: string }
+        - name: targetType
+          in: query
+          schema: { type: string }
+        - name: dateFrom
+          in: query
+          schema: { type: string, format: date-time }
+        - name: dateTo
+          in: query
+          schema: { type: string, format: date-time }
+      responses:
+        '200':
+          description: 分页列表
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuditPageResp' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /api/v1/admin/config:
+    get:
+      tags: [admin-system]
+      summary: 系统配置（仅 ADMIN）
+      operationId: getConfig
+      parameters:
+        - name: category
+          in: query
+          schema: { type: string, enum: [FACE, CHECKIN, AGENT, SYSTEM] }
+      responses:
+        '200':
+          description: 配置项列表
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ConfigListResp' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    put:
+      tags: [admin-system]
+      summary: 修改配置（仅 ADMIN；editable=0 的项拒绝修改）
+      operationId: updateConfig
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ConfigUpdateReq' }
+      responses:
+        '200':
+          description: 已保存
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ConfigListResp' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /api/v1/agent/session:
+    post:
+      tags: [admin-system]
+      summary: 换取 Agent 一次性 code（用于嵌入 Streamlit）
+      description: |
+        返回 60 秒单次消费的 code；Agent 服务用 `POST /agent/sso/exchange` 换成会话 token。
+        **不把 JWT 放进 URL**，避免被 nginx 日志记录（D6）。
+      operationId: agentSessionCode
+      responses:
+        '200':
+          description: code 与到期时间
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AgentCodeResp' }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  parameters:
+    Page:
+      name: page
+      in: query
+      description: 从 1 起
+      schema: { type: integer, minimum: 1, default: 1 }
+    Size:
+      name: size
+      in: query
+      description: 默认 20，上限 100
+      schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+    PathId:
+      name: id
+      in: path
+      required: true
+      schema: { type: integer, format: int64 }
+    PathSessionId:
+      name: sid
+      in: path
+      required: true
+      schema: { type: integer, format: int64 }
+
+  responses:
+    BadRequest:
+      description: 参数错误（FA-2001 的 400 变体、FA-3002、FA-4003 等）
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResult' }
+    Unauthorized:
+      description: 未认证或令牌失效（FA-1001 / FA-1002）
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResult' }
+    Forbidden:
+      description: 权限不足或超数据范围（FA-1003 / FA-2006 / FA-3004 / FA-5002）
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResult' }
+    NotFound:
+      description: 资源不存在（FA-2001）
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResult' }
+    Conflict:
+      description: 状态冲突（FA-1004 / FA-2002 / FA-2003 / FA-2005 / FA-3001 / FA-3003 / FA-5001）
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResult' }
+    TooManyRequests:
+      description: 限流（FA-3005 或登录失败锁定）
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResult' }
+
+  schemas:
+    # ---------- 响应包 ----------
+    Result:
+      type: object
+      required: [code, message, traceId]
+      properties:
+        code:
+          type: string
+          pattern: '^FA-\d{4}$'
+          example: FA-0000
+        message: { type: string, example: ok }
+        traceId: { type: string, example: b1f2c3d4e5 }
+      additionalProperties: false
+
+    ErrorResult:
+      allOf:
+        - $ref: '#/components/schemas/Result'
+        - type: object
+          properties:
+            data:
+              type: object
+              nullable: true
+              description: 部分错误码需要补充信息，例如 FA-2005 的 studentCount、FA-4003 的 hint
+
+    EmptyResp:
+      allOf:
+        - $ref: '#/components/schemas/Result'
+        - type: object
+          properties:
+            data:
+              type: object
+              nullable: true
+
+    PageMeta:
+      type: object
+      required: [page, size, total]
+      properties:
+        page: { type: integer, minimum: 1 }
+        size: { type: integer, minimum: 1, maximum: 100 }
+        total: { type: integer, minimum: 0 }
+
+    # ---------- 枚举 ----------
+    Role:
+      type: string
+      enum: [ADMIN, TEACHER, STUDENT]
+    StudentStatus:
+      type: string
+      enum: [ACTIVE, TRANSFERRED, ARCHIVED]
+    OrgStatus:
+      type: string
+      enum: [ACTIVE, ARCHIVED]
+    SessionStatus:
+      type: string
+      enum: [ACTIVE, CLOSED, CANCELLED]
+    AttendanceStatus:
+      type: string
+      enum: [PRESENT, LATE, ABSENT, LEAVE, EXEMPT]
+    AppealStatus:
+      type: string
+      enum: [PENDING, APPROVED, REJECTED, WITHDRAWN]
+    FaceProfileStatus:
+      type: string
+      enum: [NONE, PENDING_REVIEW, ACTIVE, REJECTED]
+    ScopeType:
+      type: string
+      enum: [CLASS, COURSE]
+      description: ★ 只有这两种；不是「课程属于班级」的表达，而是授权维度（D7）
+
+    # ---------- 认证 ----------
+    LoginReq:
+      type: object
+      additionalProperties: false
+      required: [username, password]
+      properties:
+        username: { type: string, minLength: 1, maxLength: 64 }
+        password: { type: string, minLength: 6, maxLength: 64, format: password }
+
+    StudentActivateReq:
+      type: object
+      additionalProperties: false
+      required: [studentNo, name, classCode, password]
+      properties:
+        studentNo: { type: string, maxLength: 32 }
+        name: { type: string, maxLength: 64 }
+        classCode: { type: string, maxLength: 32, description: 班级邀请码 }
+        password:
+          type: string
+          minLength: 8
+          maxLength: 64
+          format: password
+          description: 至少 8 位，须含字母与数字
+
+    TokenData:
+      type: object
+      required: [accessToken, refreshToken, role, expiresIn]
+      properties:
+        accessToken: { type: string }
+        refreshToken: { type: string }
+        role: { $ref: '#/components/schemas/Role' }
+        expiresIn: { type: integer, description: accessToken 剩余秒数 }
+        profile: { $ref: '#/components/schemas/Profile' }
+
+    TokenResp:
+      allOf:
+        - $ref: '#/components/schemas/Result'
+        - type: object
+          properties:
+            data: { $ref: '#/components/schemas/TokenData' }
+
+    LoginResp:
+      allOf:
+        - $ref: '#/components/schemas/Result'
+        - type: object
+          properties:
+            data: { $ref: '#/components/schemas/TokenData' }
+
+    Profile:
+      type: object
+      description: 当前用户档案。学生只有本人数据；教师带授权范围
+      properties:
+        id: { type: integer, format: int64, description: account.id }
+        username: { type: string }
+        name: { type: string }
+        role: { $ref: '#/components/schemas/Role' }
+        teacherId: { type: integer, format: int64, nullable: true }
+        studentId: { type: integer, format: int64, nullable: true }
+        classId: { type: integer, format: int64, nullable: true, description: 仅学生有 }
+        className: { type: string, nullable: true }
+        faceStatus: { $ref: '#/components/schemas/FaceProfileStatus' }
+
+    MeData:
+      allOf:
+        - $ref: '#/components/schemas/Profile'
+        - type: object
+          properties:
+            permissions:
+              type: array
+              items: { type: string }
+              description: 权限点，供前端 v-permission 使用
+            scope:
+              type: object
+              description: 教师的可用范围；ADMIN 为全量
+              properties:
+                classIds: { type: array, items: { type: integer, format: int64 } }
+                courseIds: { type: array, items: { type: integer, format: int64 } }
+
+    MeResp:
+      allOf:
+        - $ref: '#/components/schemas/Result'
+        - type: object
+          properties:
+            data: { $ref: '#/components/schemas/MeData' }
+
+    # ---------- 班级 ----------
+    Class:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        code: { type: string, description: 创建后不可修改 }
+        name: { type: string }
+        grade: { type: string, nullable: true }
+        major: { type: string, nullable: true }
+        ownerTeacherId: { type: integer, format: int64, nullable: true }
+        ownerTeacherName: { type: string, nullable: true }
+        status: { $ref: '#/components/schemas/OrgStatus' }
+        remark: { type: string, nullable: true }
+        studentCount: { type: integer, description: 在读学生数，列表页直接用，避免二次请求 }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    ClassCreateReq:
+      type: object
+      additionalProperties: false
+      required: [code, name]
+      properties:
+        code:
+          type: string
+          pattern: '^[A-Za-z0-9]{4,32}$'
+          description: 4~32 位字母数字，全局唯一，创建后不可修改
+        name: { type: string, minLength: 1, maxLength: 120 }
+        grade: { type: string, maxLength: 16, nullable: true }
+        major: { type: string, maxLength: 120, nullable: true }
+        ownerTeacherId: { type: integer, format: int64, nullable: true }
+        remark: { type: string, maxLength: 255, nullable: true }
+
+    ClassUpdateReq:
+      type: object
+      additionalProperties: false
+      description: ★ 不含 code —— 班级码被学生用于激活，创建后不可改
+      properties:
+        name: { type: string, minLength: 1, maxLength: 120 }
+        grade: { type: string, maxLength: 16, nullable: true }
+        major: { type: string, maxLength: 120, nullable: true }
+        ownerTeacherId: { type: integer, format: int64, nullable: true }
+        status: { $ref: '#/components/schemas/OrgStatus' }
+        remark: { type: string, maxLength: 255, nullable: true }
+
+    ClassResp:
+      allOf:
+        - $ref: '#/components/schemas/Result'
+        - type: object
+          properties:
+            data: { $ref: '#/components/schemas/Class' }
+
+    ClassPageResp:
+      allOf:
+        - $ref: '#/components/schemas/Result'
+        - type: object
+          properties:
+            data:
+              allOf:
+                - $ref: '#/components/schemas/PageMeta'
+                - type: object
+                  properties:
+                    items: { type: array, items: { $ref: '#/components/schemas/Class' } }
+
+    # ---------- 课程 ----------
+    Course:
+      type: object
+      description: ★ 结构中不存在 classId。出现即契约违规（§16.3 场景 16）
+      properties:
+        id: { type: integer, format: int64 }
+        code: { type: string, description: 创建后不可修改 }
+        name: { type: string }
+        semester: { type: string, nullable: true }
+        ownerTeacherId: { type: integer, format: int64, nullable: true }
+        ownerTeacherName: { type: string, nullable: true }
+        status: { $ref: '#/components/schemas/OrgStatus' }
+        remark: { type: string, nullable: true }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    CourseCreateReq:
+      type: object
+      additionalProperties: false
+      required: [code, name]
+      description: ★ 提交 classId 会被 400 拒绝（additionalProperties=false + 服务端未知字段校验）
+      properties:
+        code:
+          type: string
+          pattern: '^[A-Z0-9]{2,32}$'
+          description: 2~32 位大写字母数字，全局唯一，创建后不可修改
+        name: { type: string, minLength: 1, maxLength: 120, description: 允许重名，唯一性靠 code }
+        semester:
+          type: string
+          maxLength: 32
+          nullable: true
+          pattern: '^\d{4}-\d{4}-[12]$'
+        ownerTeacherId: { type: integer, format: int64, nullable: true }
+        remark: { type: string, maxLength: 255, nullable: true }
+
+    CourseUpdateReq:
+      type: object
+      additionalProperties: false
+      description: ★ 不含 code，也不含任何班级字段
+      properties:
+        name: { type: string, minLength: 1, maxLength: 120 }
+        semester: { type: string, maxLength: 32, nullable: true }
+        ownerTeacherId: { type: integer, format: int64, nullable: true }
+        status: { $ref: '#/components/schemas/OrgStatus' }
+        remark: { type: string, maxLength: 255, nullable: true }
+
+    CourseResp:
+      allOf:
+        - $ref: '#/components/schemas/Result'
+        - type: object
+          properties:
+            data: { $ref: '#/components/schemas/Course' }
+
+    CoursePageResp:
+      allOf:
+        - $ref: '#/components/schemas/Result'
+        - type: object
+          properties:
+            data:
+              allOf:
+                - $ref: '#/components/schemas/PageMeta'
+                - type: object
+                  properties:
+                    items: { type: array, items: { $ref: '#/components/schemas/Course' } }
+
+    DeleteResult:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        archived:
+          type: boolean
+          description: true = 因被引用而转 ARCHIVED；false = 物理删除
+
+    DeleteResultResp:
+      allOf:
+        - $ref: '#/components/schemas/Result'
+        - type: object
+          properties:
+            data: { $ref: '#/components/schemas/DeleteResult' }
+
+    # ---------- 学生 ----------
+    Student:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        studentNo: { type: string }
+        name: { type: string }
+        classId: { type: integer, format: int64 }
+        className: { type: string }
+        status: { $ref: '#/components/schemas/StudentStatus' }
+        activated: { type: boolean, description: account_id 是否已回填 }
+        faceStatus: { $ref: '#/components/schemas/FaceProfileStatus' }
+        createdAt: { type: string, format: date-time }
+
+    StudentCreateReq:
+      type: object
+      additionalProperties: false
+      required: [studentNo, name, classId]
+      properties:
+        studentNo: { type: string, maxLength: 32 }
+        name: { type: string, maxLength: 64 }
+        classId: { type: integer, format: int64 }
+
+    StudentUpdateReq:
+      type: object
+      additionalProperties: false
+      properties:
+        name: { type: string, maxLength: 64 }
+        classId: { type: integer, format: int64, description: 改动即视为转班，写审计 }
+        status: { $ref: '#/components/schemas/StudentStatus' }
+
+    StudentResp:
+      allOf:
+        - $ref: '#/components/schemas/Result'
+        - type: object
+          properties:
+            data: { $ref: '#/components/schemas/Student' }
+
+    StudentPageResp:
+      allOf:
+        - $ref: '#/components/schemas/Result'
+        - type: object
+          properties:
+            data:
+              allOf:
+                - $ref: '#/components/schemas/PageMeta'
+                - type: object
+                  properties:
+                    items: { type: array, items: { $ref: '#/components/schemas/Student' } }
+
+    ImportRowError:
+      type: object
+      required: [line, reason]
+      properties:
+        line: { type: integer, description: CSV 行号，从 1 起（含表头） }
+        studentNo: { type: string, nullable: true }
+        reason: { type: string }
+
+    ImportResult:
+      type: object
+      properties:
+        total: { type: integer }
+        created: { type: integer }
+        updated: { type: integer }
+        failed: { type: integer }
+        errors: { type: array, items: { $ref: '#/components/schemas/ImportRowError' } }
+
+    ImportResultResp:
+      allOf:
+        - $ref: '#/components/schemas/Result'
+        - type: object
+          properties:
+            data: { $ref: '#/components/schemas/ImportResult' }
+
+    # ---------- 人脸 ----------
+    FaceEnrollReq:
+      type: object
+      additionalProperties: false
+      required: [sampleKeys, consentVersion]
+      properties:
+        sampleKeys:
+          type: array
+          minItems: 5
+          maxItems: 10
+          items: { type: string }
+          description: 已加密上传的样本对象键
+        consentVersion:
+          type: string
+          maxLength: 16
+          description: 用户勾选的同意书版本；服务端写 account.face_consent_at/version
+
+    FaceReviewReq:
+      type: object
+      additionalProperties: false
+      required: [approved]
+      properties:
+        approved: { type: boolean }
+        rejectReason:
+          type: string
+          maxLength: 255
+          description: approved=false 时必填
+
+    FaceStatus:
+      type: object
+      properties:
+        studentId: { type: integer, format: int64 }
+        status: { $ref: '#/components/schemas/FaceProfileStatus' }
+        sampleCount: { type: integer }
+        submittedAt: { type: string, format: date-time, nullable: true }
+        reviewedAt: { type: string, format: date-time, nullable: true }
+        rejectReason: { type: string, nullable: true }
+
+    FaceStatusResp:
+      allOf:
+        - $ref: '#/components/schemas/Result'
+        - type: object
+          properties:
+            data: { $ref: '#/components/schemas/FaceStatus' }
+
+    # ---------- 教师 ----------
+    Teacher:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        teacherNo: { type: string }
+        name: { type: string }
+        department: { type: string, nullable: true }
+        title: { type: string, nullable: true }
+        status: { type: string, enum: [ACTIVE, DISABLED] }
+        classCount: { type: integer, description: 已授权班级数 }
+        courseCount: { type: integer, description: 已授权课程数 }
+
+    TeacherCreateReq:
+      type: object
+      additionalProperties: false
+      required: [teacherNo, name, password]
+      description: ★ 没有 role 字段 —— 新建教师的角色恒为 TEACHER（§8.2）
+      properties:
+        teacherNo: { type: string, maxLength: 32 }
+        name: { type: string, maxLength: 64 }
+        password: { type: string, minLength: 8, maxLength: 64, format: password }
+        department: { type: string, maxLength: 120, nullable: true }
+        title: { type: string, maxLength: 64, nullable: true }
+
+    TeacherUpdateReq:
+      type: object
+      additionalProperties: false
+      properties:
+        name: { type: string, maxLength: 64 }
+        department: { type: string, maxLength: 120, nullable: true }
+        title: { type: string, maxLength: 64, nullable: true }
+        status: { type: string, enum: [ACTIVE, DISABLED] }
+
+    TeacherResp:
+      allOf:
+        - $ref: '#/components/schemas/Result'
+        - type: object
+          properties:
+            data: { $ref: '#/components/schemas/Teacher' }
+
+    TeacherPageResp:
+      allOf:
+        - $ref: '#/components/schemas/Result'
+        - type: object
+          properties:
+            data:
+              allOf:
+                - $ref: '#/components/schemas/PageMeta'
+                - type: object
+                  properties:
+                    items: { type: array, items: { $ref: '#/components/schemas/Teacher' } }
+
+    # ---------- 授权范围 ----------
+    Scope:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        teacherId: { type: integer, format: int64 }
+        teacherName: { type: string }
+        scopeType: { $ref: '#/components/schemas/ScopeType' }
+        scopeId: { type: integer, format: int64 }
+        scopeName: { type: string, description: 班级名或课程名 }
+        grantedBy: { type: integer, format: int64, nullable: true }
+        createdAt: { type: string, format: date-time }
+
+    ScopeCreateReq:
+      type: object
+      additionalProperties: false
+      required: [teacherId, scopeType, scopeId]
+      properties:
+        teacherId: { type: integer, format: int64 }
+        scopeType: { $ref: '#/components/schemas/ScopeType' }
+        scopeId: { type: integer, format: int64 }
+
+    ScopeResp:
+      allOf:
+        - $ref: '#/components/schemas/Result'
+        - type: object
+          properties:
+            data: { $ref: '#/components/schemas/Scope' }
+
+    ScopeListResp:
+      allOf:
+        - $ref: '#/components/schemas/Result'
+        - type: object
+          properties:
+            data: { type: array, items: { $ref: '#/components/schemas/Scope' } }
+
+    # ---------- 签到会话 ----------
+    Session:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        title: { type: string }
+        classId: { type: integer, format: int64 }
+        className: { type: string, description: ★ 与 courseName 必须并列展示，避免选错组合 }
+        courseId: { type: integer, format: int64 }
+        courseName: { type: string }
+        teacherId: { type: integer, format: int64 }
+        teacherName: { type: string }
+        status: { $ref: '#/components/schemas/SessionStatus' }
+        startAt: { type: string, format: date-time }
+        endAt: { type: string, format: date-time }
+        lateAfterSec: { type: integer }
+        allowAppeal: { type: boolean }
+        expectedCount: { type: integer, description: 应到人数快照 }
+        presentCount: { type: integer }
+        lateCount: { type: integer }
+        absentCount: { type: integer }
+        closedAt: { type: string, format: date-time, nullable: true }
+        createdAt: { type: string, format: date-time }
+
+    SessionCreateReq:
+      type: object
+      additionalProperties: false
+      required: [classId, courseId, title, durationMinutes]
+      properties:
+        classId: { type: integer, format: int64, description: ★ 必填，决定应到名单 }
+        courseId: { type: integer, format: int64, description: ★ 必填，仅用于统计口径 }
+        title: { type: string, minLength: 1, maxLength: 120 }
+        durationMinutes:
+          type: integer
+          minimum: 1
+          maximum: 240
+          description: 服务端换算 end_at = start_at + durationMinutes
+        lateAfterSec:
+          type: integer
+          minimum: 0
+          maximum: 7200
+          default: 300
+        allowAppeal: { type: boolean, default: true }
+
+    SessionResp:
+      allOf:
+        - $ref: '#/components/schemas/Result'
+        - type: object
+          properties:
+            data: { $ref: '#/components/schemas/Session' }
+
+    SessionPageResp:
+      allOf:
+        - $ref: '#/components/schemas/Result'
+        - type: object
+          properties:
+            data:
+              allOf:
+                - $ref: '#/components/schemas/PageMeta'
+                - type: object
+                  properties:
+                    items: { type: array, items: { $ref: '#/components/schemas/Session' } }
+
+    QrData:
+      type: object
+      required: [sessionId, token, qrUrl, expiresAt, qrEpoch]
+      properties:
+        sessionId: { type: integer, format: int64 }
+        token: { type: string, minLength: 16, maxLength: 16 }
+        qrUrl:
+          type: string
+          description: 'https://<mobile-host>/checkin?sid={sessionId}&tk={token}'
+        expiresAt: { type: string, format: date-time, description: 本窗口结束时刻，前端据此倒计时 }
+        qrEpoch: { type: integer }
+        className: { type: string }
+        courseName: { type: string }
+
+    QrResp:
+      allOf:
+        - $ref: '#/components/schemas/Result'
+        - type: object
+          properties:
+            data: { $ref: '#/components/schemas/QrData' }
+
+    # ---------- 移动端 ----------
+    ActiveSession:
+      type: object
+      properties:
+        sessionId: { type: integer, format: int64 }
+        title: { type: string }
+        className: { type: string }
+        courseName: { type: string }
+        startAt: { type: string, format: date-time }
+        endAt: { type: string, format: date-time }
+        remainingSec: { type: integer }
+        myStatus:
+          type: string
+          enum: [NOT_STARTED, IN_PROGRESS, PRESENT, LATE]
+          description: IN_PROGRESS = 已 join 未完成
+
+    ActiveSessionListResp:
+      allOf:
+        - $ref: '#/components/schemas/Result'
+        - type: object
+          properties:
+            data: { type: array, items: { $ref: '#/components/schemas/ActiveSession' } }
+
+    JoinData:
+      type: object
+      required: [checkinTicket, ttl, className, courseName, challengeRequired]
+      properties:
+        checkinTicket: { type: string, description: '短期票据，TTL 60s，直连 /face-api 用' }
+        ttl: { type: integer, description: 票据剩余秒数 }
+        className: { type: string }
+        courseName: { type: string }
+        sessionTitle: { type: string }
+        remainingSec: { type: integer, description: 会话剩余秒数 }
+        challengeRequired: { type: boolean, description: 人脸档案 ACTIVE 时必须为 true }
+        retryLeft: { type: integer }
+
+    JoinResp:
+      allOf:
+        - $ref: '#/components/schemas/Result'
+        - type: object
+          properties:
+            data: { $ref: '#/components/schemas/JoinData' }
+
+    MobileAttendance:
+      type: object
+      properties:
+        sessionId: { type: integer, format: int64 }
+        className: { type: string }
+        courseName: { type: string }
+        status: { $ref: '#/components/schemas/AttendanceStatus' }
+        checkinAt: { type: string, format: date-time, nullable: true }
+        canAppeal: { type: boolean }
+        appealId: { type: integer, format: int64, nullable: true }
+        appealStatus: { $ref: '#/components/schemas/AppealStatus' }
+
+    MobileAttendanceResp:
+      allOf:
+        - $ref: '#/components/schemas/Result'
+        - type: object
+          properties:
+            data: { $ref: '#/components/schemas/MobileAttendance' }
+
+    MobileHistoryResp:
+      allOf:
+        - $ref: '#/components/schemas/Result'
+        - type: object
+          properties:
+            data:
+              allOf:
+                - $ref: '#/components/schemas/PageMeta'
+                - type: object
+                  properties:
+                    items: { type: array, items: { $ref: '#/components/schemas/MobileAttendance' } }
+
+    # ---------- 考勤 ----------
+    Attendance:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        sessionId: { type: integer, format: int64 }
+        sessionTitle: { type: string }
+        classId: { type: integer, format: int64 }
+        className: { type: string }
+        courseId: { type: integer, format: int64 }
+        courseName: { type: string }
+        studentId: { type: integer, format: int64 }
+        studentNo: { type: string }
+        studentName: { type: string }
+        status: { $ref: '#/components/schemas/AttendanceStatus' }
+        checkinAt: { type: string, format: date-time, nullable: true }
+        similarity: { type: number, format: double, nullable: true }
+        livenessMedian: { type: number, format: double, nullable: true }
+        identitySim: { type: number, format: double, nullable: true }
+        actionCount: { type: integer, nullable: true }
+        actionSeq: { type: string, nullable: true }
+        rejectGate:
+          type: string
+          nullable: true
+          enum: [liveness, identity, action_count, multi_face, no_face, match]
+          description: ★ 小写，与 §13.2 逐字一致；失败时必须非空
+        adjustReason: { type: string, nullable: true }
+        adjustedBy: { type: integer, format: int64, nullable: true }
+
+    AttendanceResp:
+      allOf:
+        - $ref: '#/components/schemas/Result'
+        - type: object
+          properties:
+            data: { $ref: '#/components/schemas/Attendance' }
+
+    AttendancePageResp:
+      allOf:
+        - $ref: '#/components/schemas/Result'
+        - type: object
+          properties:
+            data:
+              allOf:
+                - $ref: '#/components/schemas/PageMeta'
+                - type: object
+                  properties:
+                    items: { type: array, items: { $ref: '#/components/schemas/Attendance' } }
+
+    AttendancePatchReq:
+      type: object
+      additionalProperties: false
+      required: [status, adjustReason]
+      properties:
+        status:
+          type: string
+          enum: [PRESENT, LATE, ABSENT, LEAVE, EXEMPT]
+          description: 教师手动可设的全部值
+        adjustReason: { type: string, minLength: 2, maxLength: 255 }
+
+    # ---------- 申诉 ----------
+    Appeal:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        attendanceId: { type: integer, format: int64 }
+        sessionId: { type: integer, format: int64 }
+        sessionTitle: { type: string }
+        studentId: { type: integer, format: int64 }
+        studentNo: { type: string }
+        studentName: { type: string }
+        className: { type: string }
+        courseName: { type: string }
+        reason: { type: string }
+        evidenceUrl:
+          type: string
+          nullable: true
+          description: 带签名的临时访问链接，不直出对象键
+        status: { $ref: '#/components/schemas/AppealStatus' }
+        reply: { type: string, nullable: true }
+        handledBy: { type: integer, format: int64, nullable: true }
+        handledAt: { type: string, format: date-time, nullable: true }
+        createdAt: { type: string, format: date-time }
+        rejectGate:
+          type: string
+          nullable: true
+          description: 原签到失败的门禁，帮教师判断是否误伤
+
+    AppealCreateReq:
+      type: object
+      additionalProperties: false
+      required: [sessionId, reason]
+      properties:
+        sessionId: { type: integer, format: int64 }
+        reason: { type: string, minLength: 5, maxLength: 500 }
+        evidenceKey: { type: string, maxLength: 255, nullable: true }
+
+    AppealHandleReq:
+      type: object
+      additionalProperties: false
+      required: [approved, reply]
+      properties:
+        approved: { type: boolean }
+        reply: { type: string, minLength: 2, maxLength: 500, description: 无论通过与否都必须给理由 }
+
+    AppealResp:
+      allOf:
+        - $ref: '#/components/schemas/Result'
+        - type: object
+          properties:
+            data: { $ref: '#/components/schemas/Appeal' }
+
+    AppealPageResp:
+      allOf:
+        - $ref: '#/components/schemas/Result'
+        - type: object
+          properties:
+            data:
+              allOf:
+                - $ref: '#/components/schemas/PageMeta'
+                - type: object
+                  properties:
+                    items: { type: array, items: { $ref: '#/components/schemas/Appeal' } }
+
+    # ---------- 统计 / 审计 / 配置 ----------
+    Overview:
+      type: object
+      properties:
+        todaySessions: { type: integer }
+        todayExpected: { type: integer }
+        todayPresent: { type: integer }
+        todayRate:
+          type: number
+          format: double
+          description: '(PRESENT + LATE) / 应到人数；LEAVE/EXEMPT 进分母不进分子'
+        pendingAppeals: { type: integer }
+        trend:
+          type: array
+          description: 近 7 天签到率
+          items:
+            type: object
+            properties:
+              date: { type: string, format: date }
+              rate: { type: number, format: double }
+              expected: { type: integer }
+              present: { type: integer }
+
+    OverviewResp:
+      allOf:
+        - $ref: '#/components/schemas/Result'
+        - type: object
+          properties:
+            data: { $ref: '#/components/schemas/Overview' }
+
+    AuditLog:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        actorId: { type: integer, format: int64, nullable: true }
+        actorName: { type: string, nullable: true }
+        actorRole: { type: string, nullable: true }
+        action: { type: string }
+        targetType: { type: string, nullable: true }
+        targetId: { type: integer, format: int64, nullable: true }
+        before: { type: object, nullable: true }
+        after: { type: object, nullable: true }
+        clientIp: { type: string, nullable: true, description: 展示层已脱敏到 /24 }
+        traceId: { type: string, nullable: true }
+        createdAt: { type: string, format: date-time }
+
+    AuditPageResp:
+      allOf:
+        - $ref: '#/components/schemas/Result'
+        - type: object
+          properties:
+            data:
+              allOf:
+                - $ref: '#/components/schemas/PageMeta'
+                - type: object
+                  properties:
+                    items: { type: array, items: { $ref: '#/components/schemas/AuditLog' } }
+
+    ConfigItem:
+      type: object
+      properties:
+        configKey: { type: string }
+        configValue: { type: string }
+        valueType: { type: string, enum: [INT, DECIMAL, BOOL, STRING, JSON] }
+        category: { type: string, enum: [FACE, CHECKIN, AGENT, SYSTEM] }
+        description: { type: string, nullable: true }
+        editable:
+          type: boolean
+          description: false 表示由标定脚本写入，管理端只读
+        updatedAt: { type: string, format: date-time }
+
+    ConfigListResp:
+      allOf:
+        - $ref: '#/components/schemas/Result'
+        - type: object
+          properties:
+            data: { type: array, items: { $ref: '#/components/schemas/ConfigItem' } }
+
+    ConfigUpdateReq:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          minItems: 1
+          items:
+            type: object
+            additionalProperties: false
+            required: [configKey, configValue]
+            properties:
+              configKey: { type: string }
+              configValue: { type: string }
+
+    AgentCodeData:
+      type: object
+      properties:
+        code: { type: string, description: 60 秒单次消费 }
+        expiresAt: { type: string, format: date-time }
+        agentUrl: { type: string, description: '/agent/?code=...' }
+
+    AgentCodeResp:
+      allOf:
+        - $ref: '#/components/schemas/Result'
+        - type: object
+          properties:
+            data: { $ref: '#/components/schemas/AgentCodeData' }

@@ -1,0 +1,638 @@
+$schema: https://json-schema.org/draft/2020-12/schema
+$id: https://gg-attendance.local/schemas/agent-tools.yaml
+title: Agent 工具契约
+version: 1.0.0
+frozen: true
+description: |
+  **这不是 REST 接口**，是给 LLM function calling 用的工具定义。
+  Agent 启动时从 Java 的 `/internal/agent/tools/catalog` 拉取**当前用户可用**的子集，
+  本文档是全量母集，只用于契约校验与代码生成。
+
+  五条设计原则（§11.4），违反即不合格：
+  1. **不提供裸 SQL 工具**。所有查询走预定义语义接口。
+  2. **字段白名单**。返回结构显式声明，杜绝 `SELECT *`。工具返回里**永远没有**人脸原图、向量、
+     手机号、身份证号 —— 这不是靠约定，而是这些字段在 DTO 里根本不存在（§13.4）。
+  3. **每次调用留痕**：读记 `agent_query_log`，写记 `agent_action_log`。
+  4. **模糊匹配要反问**：命中 2 人必须反问，不许猜。
+  5. **工具不合并**。没有 `update_student_and_checkin` 这种复合工具 —— 一次确认只做一件事，
+     撤销才有意义。
+
+levels:
+  L0:
+    name: 只读查询
+    requiresConfirm: false
+    default: true
+  L1:
+    name: 生成草稿（不落库）
+    requiresConfirm: false
+    default: true
+    note: 返回 draftId + 预览数据；草稿表不入库，存 Redis 15 分钟
+  L2:
+    name: 写操作
+    requiresConfirm: true
+    default: true
+    note: 必须两阶段确认（preview → interrupt → confirmToken → 执行）
+  L3:
+    name: 定时与批量
+    requiresConfirm: true
+    default: false
+    note: 额外需要 sys_config 中 AGENT_LEVEL_L3=true 且管理员逐人授权
+
+common:
+  authz:
+    note: 所有工具由 Java 侧按 teacher_scope 强制过滤；Agent 传入的 classId 若不在范围内直接 FA-6004，不返回 preview
+  errors:
+    FA-6004: 超出数据范围。Agent 必须回答「你当前的数据范围不包含该记录」，**不得换参数重试**
+  ambiguity:
+    note: 按姓名查询命中多人时返回 candidates，Agent 必须反问，不得任选其一
+
+tools:
+  # ============================ L0 只读 ============================
+  - name: get_attendance_status
+    level: L0
+    title: 查询学生考勤状态
+    description: 按学号或姓名查某人在指定时间范围内的每次签到结果。
+    params:
+      type: object
+      additionalProperties: false
+      properties:
+        studentNo: { type: string, maxLength: 32 }
+        studentName: { type: string, maxLength: 64 }
+        classId: { type: integer, format: int64 }
+        courseId: { type: integer, format: int64 }
+        dateFrom: { type: string, format: date }
+        dateTo: { type: string, format: date }
+      anyOf:
+        - required: [studentNo]
+        - required: [studentName]
+    returns:
+      type: array
+      items:
+        type: object
+        properties:
+          sessionId: { type: integer }
+          className: { type: string }
+          courseName: { type: string }
+          date: { type: string, format: date }
+          status: { type: string, enum: [PRESENT, LATE, ABSENT, LEAVE, EXEMPT] }
+          checkinAt: { type: string, format: date-time, nullable: true }
+    citation: 命中条数 = 返回数组长度
+
+  - name: get_session_summary
+    level: L0
+    title: 查询单场签到汇总
+    description: 一场签到的应到/实到/迟到/缺勤与出勤率。
+    params:
+      type: object
+      additionalProperties: false
+      required: [sessionId]
+      properties:
+        sessionId: { type: integer, format: int64 }
+    returns:
+      type: object
+      properties:
+        className: { type: string }
+        courseName: { type: string }
+        total: { type: integer }
+        present: { type: integer }
+        late: { type: integer }
+        absent: { type: integer }
+        leave: { type: integer }
+        rate: { type: number, description: '(present + late) / total' }
+
+  - name: list_sessions
+    level: L0
+    title: 查询签到会话列表
+    params:
+      type: object
+      additionalProperties: false
+      required: [dateFrom, dateTo]
+      properties:
+        dateFrom: { type: string, format: date }
+        dateTo: { type: string, format: date }
+        classId: { type: integer, format: int64 }
+        courseId: { type: integer, format: int64 }
+    returns:
+      type: array
+      items:
+        type: object
+        properties:
+          sessionId: { type: integer }
+          className: { type: string }
+          courseName: { type: string }
+          startAt: { type: string, format: date-time }
+          status: { type: string, enum: [ACTIVE, CLOSED, CANCELLED] }
+
+  - name: get_student_profile
+    level: L0
+    title: 查询学生档案
+    description: '只返回姓名、班级、人脸状态、样本数。**不含手机号、身份证**。'
+    params:
+      type: object
+      additionalProperties: false
+      required: [studentNo]
+      properties:
+        studentNo: { type: string, maxLength: 32 }
+    returns:
+      type: object
+      properties:
+        name: { type: string }
+        className: { type: string }
+        faceStatus: { type: string, enum: [NONE, PENDING_REVIEW, ACTIVE, REJECTED] }
+        enrollCount: { type: integer }
+
+  - name: get_class_roster
+    level: L0
+    title: 查询班级名册
+    params:
+      type: object
+      additionalProperties: false
+      required: [classId]
+      properties:
+        classId: { type: integer, format: int64 }
+    returns:
+      type: array
+      items:
+        type: object
+        properties:
+          studentNo: { type: string }
+          name: { type: string }
+          faceStatus: { type: string, enum: [NONE, PENDING_REVIEW, ACTIVE, REJECTED] }
+
+  - name: get_course_stats
+    level: L0
+    title: 按课程聚合统计
+    params:
+      type: object
+      additionalProperties: false
+      required: [courseId, dateFrom, dateTo]
+      properties:
+        courseId: { type: integer, format: int64 }
+        dateFrom: { type: string, format: date }
+        dateTo: { type: string, format: date }
+    returns:
+      type: object
+      properties:
+        courseName: { type: string }
+        sessionCount: { type: integer }
+        rate: { type: number }
+        lateRate: { type: number }
+        topAbsent:
+          type: array
+          items:
+            type: object
+            properties:
+              studentNo: { type: string }
+              name: { type: string }
+              absentCount: { type: integer }
+
+  - name: get_class_stats
+    level: L0
+    title: 按班级聚合统计
+    description: 口径与 get_course_stats 一致，只是维度换成班级。
+    params:
+      type: object
+      additionalProperties: false
+      required: [classId, dateFrom, dateTo]
+      properties:
+        classId: { type: integer, format: int64 }
+        dateFrom: { type: string, format: date }
+        dateTo: { type: string, format: date }
+    returns:
+      type: object
+      properties:
+        className: { type: string }
+        sessionCount: { type: integer }
+        rate: { type: number }
+        lateRate: { type: number }
+        topAbsent:
+          type: array
+          items:
+            type: object
+            properties:
+              studentNo: { type: string }
+              name: { type: string }
+              absentCount: { type: integer }
+
+  - name: get_attendance_trend
+    level: L0
+    title: 出勤率周趋势
+    params:
+      type: object
+      additionalProperties: false
+      required: [weeks]
+      properties:
+        classId: { type: integer, format: int64 }
+        courseId: { type: integer, format: int64 }
+        weeks: { type: integer, minimum: 1, maximum: 52 }
+      anyOf:
+        - required: [classId]
+        - required: [courseId]
+    returns:
+      type: array
+      items:
+        type: object
+        properties:
+          weekStart: { type: string, format: date }
+          rate: { type: number }
+          expected: { type: integer }
+          present: { type: integer }
+
+  - name: list_pending_appeals
+    level: L0
+    title: 待处理申诉列表
+    params:
+      type: object
+      additionalProperties: false
+      properties:
+        classId: { type: integer, format: int64 }
+        courseId: { type: integer, format: int64 }
+    returns:
+      type: array
+      items:
+        type: object
+        properties:
+          appealId: { type: integer }
+          studentName: { type: string }
+          sessionTitle: { type: string }
+          reason: { type: string }
+          at: { type: string, format: date-time }
+
+  # ============================ L1 草稿 ============================
+  - name: draft_import_students
+    level: L1
+    title: 预览学生导入
+    description: '解析 CSV，返回「将新增 N / 更新 M / 失败 K（含行号与原因）」。**不写库**。'
+    params:
+      type: object
+      additionalProperties: false
+      required: [classCode, csvText]
+      properties:
+        classCode: { type: string, maxLength: 32 }
+        csvText: { type: string, maxLength: 2000000 }
+    returns:
+      type: object
+      properties:
+        draftId: { type: string, description: 15 分钟有效，执行 import_students 时回传 }
+        total: { type: integer }
+        willCreate: { type: integer }
+        willUpdate: { type: integer }
+        failed: { type: integer }
+        errors:
+          type: array
+          items:
+            type: object
+            properties:
+              line: { type: integer }
+              reason: { type: string }
+
+  - name: draft_session
+    level: L1
+    title: 生成签到参数草稿
+    description: 只算参数与应到人数，不建会话。用户确认后再走 create_session。
+    params:
+      type: object
+      additionalProperties: false
+      required: [classId, courseId]
+      properties:
+        classId: { type: integer, format: int64 }
+        courseId: { type: integer, format: int64 }
+        durationMinutes: { type: integer, minimum: 1, maximum: 240, default: 10 }
+        lateAfterSec: { type: integer, minimum: 0, maximum: 7200, default: 300 }
+    returns:
+      type: object
+      properties:
+        className: { type: string }
+        courseName: { type: string }
+        expectedCount: { type: integer, description: 应到人数，只跟班级有关 }
+        warnings:
+          type: array
+          items: { type: string }
+          description: 例如「该班级有 2 名学生人脸未审核，将无法签到」
+
+  - name: draft_absent_list
+    level: L1
+    title: 生成缺勤名单
+    params:
+      type: object
+      additionalProperties: false
+      properties:
+        sessionId: { type: integer, format: int64 }
+        classId: { type: integer, format: int64 }
+        dateFrom: { type: string, format: date }
+        dateTo: { type: string, format: date }
+    returns:
+      type: object
+      properties:
+        draftId: { type: string }
+        count: { type: integer }
+        rows:
+          type: array
+          items:
+            type: object
+            properties:
+              studentNo: { type: string }
+              name: { type: string }
+              className: { type: string }
+              courseName: { type: string }
+              date: { type: string, format: date }
+
+  - name: draft_appeal_reply
+    level: L1
+    title: 起草申诉回复
+    description: '根据失败门禁与证据摘要生成处理意见与文案。**必须由教师确认后才提交**。'
+    params:
+      type: object
+      additionalProperties: false
+      required: [appealId]
+      properties:
+        appealId: { type: integer, format: int64 }
+    returns:
+      type: object
+      properties:
+        suggestedDecision: { type: string, enum: [APPROVE, REJECT] }
+        reply: { type: string }
+        rationale: { type: string, description: 依据，例如「rejectGate=no_face，且有 2 次重试记录」 }
+        rejectGate: { type: string, nullable: true }
+
+  - name: summarize_session
+    level: L1
+    title: 生成签到小结
+    params:
+      type: object
+      additionalProperties: false
+      required: [sessionId]
+      properties:
+        sessionId: { type: integer, format: int64 }
+    returns:
+      type: object
+      properties:
+        text: { type: string }
+        stats:
+          type: object
+          properties:
+            total: { type: integer }
+            present: { type: integer }
+            late: { type: integer }
+            absent: { type: integer }
+
+  # ============================ L2 写操作 ============================
+  - name: create_session
+    level: L2
+    requiresConfirm: true
+    undoable: true
+    undoNote: 撤销 = 取消该会话（CANCELLED），不产生考勤
+    title: 发起签到
+    params:
+      type: object
+      additionalProperties: false
+      required: [classId, courseId, title, durationMinutes]
+      properties:
+        classId: { type: integer, format: int64 }
+        courseId: { type: integer, format: int64 }
+        title: { type: string, maxLength: 120 }
+        durationMinutes: { type: integer, minimum: 1, maximum: 240 }
+        lateAfterSec: { type: integer, minimum: 0, maximum: 7200, default: 300 }
+
+  - name: close_session
+    level: L2
+    requiresConfirm: true
+    undoable: true
+    undoNote: 仅 30 分钟内可撤销；撤销会把本场补的 ABSENT 一并撤回
+    title: 结束签到
+    params:
+      type: object
+      additionalProperties: false
+      required: [sessionId]
+      properties:
+        sessionId: { type: integer, format: int64 }
+
+  - name: rotate_qr
+    level: L2
+    requiresConfirm: true
+    undoable: true
+    title: 强制换码
+    params:
+      type: object
+      additionalProperties: false
+      required: [sessionId]
+      properties:
+        sessionId: { type: integer, format: int64 }
+
+  - name: manual_checkin
+    level: L2
+    requiresConfirm: true
+    undoable: true
+    title: 手工补签
+    params:
+      type: object
+      additionalProperties: false
+      required: [sessionId, studentId, reason]
+      properties:
+        sessionId: { type: integer, format: int64 }
+        studentId: { type: integer, format: int64 }
+        reason: { type: string, maxLength: 255 }
+        status: { type: string, enum: [PRESENT, LATE], default: PRESENT }
+
+  - name: mark_leave
+    level: L2
+    requiresConfirm: true
+    undoable: true
+    title: 标记请假
+    params:
+      type: object
+      additionalProperties: false
+      required: [sessionId, studentId, reason]
+      properties:
+        sessionId: { type: integer, format: int64 }
+        studentId: { type: integer, format: int64 }
+        reason: { type: string, maxLength: 255 }
+
+  - name: mark_exempt
+    level: L2
+    requiresConfirm: true
+    undoable: true
+    title: 标记免签（公假等）
+    params:
+      type: object
+      additionalProperties: false
+      required: [sessionId, studentId, reason]
+      properties:
+        sessionId: { type: integer, format: int64 }
+        studentId: { type: integer, format: int64 }
+        reason: { type: string, maxLength: 255 }
+
+  - name: handle_appeal
+    level: L2
+    requiresConfirm: true
+    undoable: true
+    undoNote: 30 分钟内可撤销，撤销会把关联考勤恢复为原状态
+    title: 处理申诉
+    params:
+      type: object
+      additionalProperties: false
+      required: [appealId, approved, reply]
+      properties:
+        appealId: { type: integer, format: int64 }
+        approved: { type: boolean }
+        reply: { type: string, maxLength: 500 }
+
+  - name: create_class
+    level: L2
+    requiresConfirm: true
+    undoable: true
+    title: 新建班级
+    params:
+      type: object
+      additionalProperties: false
+      required: [code, name]
+      properties:
+        code: { type: string, pattern: '^[A-Za-z0-9]{4,32}$' }
+        name: { type: string, maxLength: 120 }
+        grade: { type: string, maxLength: 16 }
+        major: { type: string, maxLength: 120 }
+        ownerTeacherId: { type: integer, format: int64 }
+
+  - name: update_class
+    level: L2
+    requiresConfirm: true
+    undoable: true
+    title: 编辑班级
+    params:
+      type: object
+      additionalProperties: false
+      required: [classId]
+      properties:
+        classId: { type: integer, format: int64 }
+        name: { type: string, maxLength: 120 }
+        grade: { type: string, maxLength: 16 }
+        major: { type: string, maxLength: 120 }
+        ownerTeacherId: { type: integer, format: int64 }
+        remark: { type: string, maxLength: 255 }
+
+  - name: archive_class
+    level: L2
+    requiresConfirm: true
+    undoable: false
+    title: 归档班级
+    description: 不物理删除。归档后不能再用于发起签到，历史记录仍可查。
+    params:
+      type: object
+      additionalProperties: false
+      required: [classId]
+      properties:
+        classId: { type: integer, format: int64 }
+
+  - name: create_course
+    level: L2
+    requiresConfirm: true
+    undoable: true
+    title: 新建课程
+    params:
+      type: object
+      additionalProperties: false
+      required: [code, name]
+      properties:
+        code: { type: string, pattern: '^[A-Z0-9]{2,32}$' }
+        name: { type: string, maxLength: 120 }
+        semester: { type: string, pattern: '^\d{4}-\d{4}-[12]$' }
+        ownerTeacherId: { type: integer, format: int64 }
+
+  - name: update_course
+    level: L2
+    requiresConfirm: true
+    undoable: true
+    title: 编辑课程
+    params:
+      type: object
+      additionalProperties: false
+      required: [courseId]
+      properties:
+        courseId: { type: integer, format: int64 }
+        name: { type: string, maxLength: 120 }
+        semester: { type: string }
+        ownerTeacherId: { type: integer, format: int64 }
+        remark: { type: string, maxLength: 255 }
+
+  - name: archive_course
+    level: L2
+    requiresConfirm: true
+    undoable: false
+    title: 归档课程
+    params:
+      type: object
+      additionalProperties: false
+      required: [courseId]
+      properties:
+        courseId: { type: integer, format: int64 }
+
+  - name: import_students
+    level: L2
+    requiresConfirm: true
+    undoable: false
+    undoNote: 批量导入不可撤销，需人工回滚。因此必须先跑 draft_import_students 给用户看结果
+    title: 执行学生批量导入
+    params:
+      type: object
+      additionalProperties: false
+      required: [draftId]
+      properties:
+        draftId: { type: string, description: 来自 draft_import_students，15 分钟内有效 }
+
+  # ============================ L3 定时与批量 ============================
+  - name: schedule_report
+    level: L3
+    requiresConfirm: true
+    undoable: true
+    title: 创建周期性报表任务
+    params:
+      type: object
+      additionalProperties: false
+      required: [frequency, classId]
+      properties:
+        frequency: { type: string, enum: [WEEKLY, MONTHLY] }
+        classId: { type: integer, format: int64 }
+        weekday: { type: integer, minimum: 1, maximum: 7, description: 仅 WEEKLY 用，1=周一 }
+        timeOfDay: { type: string, pattern: '^\d{2}:\d{2}$', default: '08:00' }
+
+  - name: batch_remind
+    level: L3
+    requiresConfirm: true
+    undoable: false
+    title: 批量发送提醒
+    description: 给满足条件的学生发站内信。单次上限 200 人。
+    params:
+      type: object
+      additionalProperties: false
+      required: [classId, condition]
+      properties:
+        classId: { type: integer, format: int64 }
+        condition:
+          type: string
+          enum: [ABSENT_3_IN_ROW, LATE_3_IN_ROW, NEVER_CHECKED_IN]
+        message: { type: string, maxLength: 500 }
+
+  - name: batch_manual_checkin
+    level: L3
+    requiresConfirm: true
+    undoable: true
+    title: 按名单批量补签
+    description: '**仅 ADMIN 可用**，单次上限 200 条。'
+    params:
+      type: object
+      additionalProperties: false
+      required: [sessionId, studentIds, reason]
+      properties:
+        sessionId: { type: integer, format: int64 }
+        studentIds:
+          type: array
+          minItems: 1
+          maxItems: 200
+          items: { type: integer, format: int64 }
+        reason: { type: string, maxLength: 255 }
+
+invariants:
+  - rule: L2 与 L3 的工具必须 requiresConfirm=true
+  - rule: 工具名全局唯一，且不得包含 'delete'、'drop'、'sql' 字样（只允许归档，不允许物理删除）
+  - rule: 任何工具的 returns 中不得出现 imageUrl、embedding、faceVector、phone、idCard 字段
+  - rule: 一次确认只对应一个工具调用；不得存在复合工具

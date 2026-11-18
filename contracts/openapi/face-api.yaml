@@ -1,0 +1,428 @@
+openapi: 3.0.3
+info:
+  title: 人脸签到系统 · Python 人脸服务
+  version: 1.0.0
+  description: |
+    `/face-api/**`，由 nginx 反代到 `face:8000`。除 `/face-api/health` 外全部鉴权。
+
+    **鉴权分两种**
+    - `/challenge/**` 用 `checkinTicket`（Java 签发，TTL 60s，绑定 sessionId + studentId + jti）
+    - `/enroll/sample` 用学生 JWT
+
+    **三条实现约束（写进契约，不靠口头约定）**
+    1. `start` 必须收 `baselineFrame`。缺失或无脸时**降级为序列首帧**并置 `baselineDegraded=true`，
+       绝不因此拒绝学生 —— 基线不可得是系统侧问题（§4.4.3）。
+    2. `frame` 在动作未完成时返回 `hint`，HTTP **200**。错误码只用于真正的失败。
+    3. 失败响应必须带 `rejectGate`，否则 §13.2 的「误拒率 ≤5%」无法归因。
+  license:
+    name: 内部项目
+servers:
+  - url: /
+    description: 经 nginx 反代
+
+tags:
+  - name: health
+  - name: challenge
+    description: 挑战生命周期（start → frame* → finish）
+  - name: enroll
+    description: 人脸采集样本质检
+
+paths:
+  /face-api/health:
+    get:
+      tags: [health]
+      summary: 存活与模型就绪状态
+      security: []
+      operationId: health
+      responses:
+        '200':
+          description: 服务状态
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/HealthResp' }
+
+  /face-api/challenge/start:
+    post:
+      tags: [challenge]
+      summary: 提交基线帧并领取动作指令
+      description: |
+        **指令前的基线帧在这里提交**。服务端在基线帧上定位嘴部 ROI、测基线暗度，
+        此后该 ROI 尺寸固定，靠面部轮廓点刚性搬运（§4.4.2）。
+
+        响应返回后，前端必须在**同一帧**渲染指令并开始采集，中间不得插入等待动画（§4.4.3）。
+      operationId: challengeStart
+      parameters:
+        - $ref: '#/components/parameters/TicketAuth'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ChallengeStartReq' }
+      responses:
+        '200':
+          description: 已领取挑战
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ChallengeStartResp' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '429': { $ref: '#/components/responses/TooManyRequests' }
+      x-error-codes: [FA-3001, FA-3005, FA-4001, FA-4002, FA-4006]
+
+  /face-api/challenge/{id}/frame:
+    post:
+      tags: [challenge]
+      summary: 上传单帧并取回实时提示
+      description: |
+        固定 4 fps。服务端按 `seq` 排序，**乱序到达的帧直接丢弃**（`accepted=false`）。
+
+        多脸判定：宽度 ≥ `MULTI_FACE_MIN_PX`（默认 90px）的脸连续 3 帧 ≥2 张才中止；
+        更小的脸只计入 `smallFacesIgnored`，不触发拦截（§4.5）。
+
+        无脸：连续 3 帧才判 `FA-4001`，单帧不判。
+      operationId: challengeFrame
+      parameters:
+        - $ref: '#/components/parameters/TicketAuth'
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [frame, seq]
+              properties:
+                frame:
+                  type: string
+                  format: binary
+                  description: JPEG，480p，q=0.7，约 30~50KB
+                seq:
+                  type: integer
+                  minimum: 0
+                  description: 从 0 递增的帧序号
+      responses:
+        '200':
+          description: 已处理（**动作未完成也走这里**，返回 hint 而非错误码）
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/FrameResp' }
+        '400':
+          description: 中止类失败（多脸 / 连续无脸）
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResult' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+      x-error-codes: [FA-4001, FA-4002]
+
+  /face-api/challenge/{id}/finish:
+    post:
+      tags: [challenge]
+      summary: 结束采集并提交判定
+      description: |
+        三道硬门禁 **AND** 关系，逐项回传，便于归因。
+
+        | 门禁 | 阈值键 | 失败码 |
+        |---|---|---|
+        | 单帧活体，多帧取中位数 | `LIVENESS_THRESHOLD` | `FA-4004` |
+        | 首末帧身份一致性 | `IDENTITY_SIM` | `FA-4007` |
+        | 动作连续段次数 | `MOUTH_*` | `FA-4003` |
+
+        通过后由服务端调 Java `/internal/checkin/commit`，本接口返回最终考勤状态。
+        `Redis SETNX` 保证同一 challenge 只提交一次；并发 finish 只有一次能拿到结果。
+      operationId: challengeFinish
+      parameters:
+        - $ref: '#/components/parameters/TicketAuth'
+        - name: id
+          in: path
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: 判定完成（可能是通过，也可能是被某道门禁拒绝）
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/FinishResp' }
+        '400':
+          description: 判定未通过。`data.rejectGate` 指明被哪道门禁拒
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResult' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '409': { $ref: '#/components/responses/Conflict' }
+        '503': { $ref: '#/components/responses/ServiceUnavailable' }
+      x-error-codes: [FA-3003, FA-3005, FA-4003, FA-4004, FA-4005, FA-4007, FA-9002]
+
+  /face-api/enroll/sample:
+    post:
+      tags: [enroll]
+      summary: 采集单张样本并返回质量反馈
+      description: |
+        质量门限（§5.4）：Laplacian 方差 ≥80、灰度均值 60~190、人脸短边 ≥120px、
+        |yaw| ≤30°、|pitch| ≤20°、图内仅 1 张脸、与已有向量相似度 <0.95。
+
+        不达标的样本**不返回 4xx**，而是 `passed=false` + `reasons[]`，
+        让前端能逐条告诉学生"往亮处站一点"而不是"采集失败"。
+      operationId: enrollSample
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [frame]
+              properties:
+                frame:
+                  type: string
+                  format: binary
+      responses:
+        '200':
+          description: 质检结果
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/EnrollSampleResp' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
+components:
+  securitySchemes:
+    ticketAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: checkinTicket
+      description: Java 签发的短期票据，非 JWT
+
+  parameters:
+    TicketAuth:
+      name: Authorization
+      in: header
+      required: true
+      description: '`Bearer <checkinTicket>`'
+      schema: { type: string }
+    InternalToken:
+      name: X-Internal-Token
+      in: header
+      required: true
+      schema: { type: string }
+
+  responses:
+    BadRequest:
+      description: 参数或输入不合法
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResult' }
+    Unauthorized:
+      description: 票据过期或无效（不泄漏内部细节）
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResult' }
+    Conflict:
+      description: 状态冲突（挑战已被消费 / 会话已结束）
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResult' }
+    TooManyRequests:
+      description: 超出重试次数
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResult' }
+    ServiceUnavailable:
+      description: Java 不可用（FA-9002，不得返回 500 堆栈）
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ErrorResult' }
+
+  schemas:
+    Result:
+      type: object
+      required: [code, message, traceId]
+      properties:
+        code: { type: string, pattern: '^FA-\d{4}$' }
+        message: { type: string }
+        traceId: { type: string }
+
+    ErrorResult:
+      allOf:
+        - $ref: '#/components/schemas/Result'
+        - type: object
+          properties:
+            data:
+              type: object
+              nullable: true
+              properties:
+                rejectGate:
+                  type: string
+                  enum: [liveness, identity, action_count, multi_face, no_face, match]
+                retryLeft: { type: integer }
+                hint: { type: string }
+                detectedCount: { type: integer }
+                requiredCount: { type: integer }
+
+    HealthData:
+      type: object
+      properties:
+        status: { type: string, enum: [UP, DEGRADED] }
+        modelName: { type: string, example: buffalo_l }
+        modelVersion: { type: string }
+        vectorCount: { type: integer, description: 已加载向量条数 }
+        studentCount: { type: integer }
+        loadMs: { type: integer, description: 向量全量加载耗时 }
+        lastRefreshAt: { type: string, format: date-time }
+        models:
+          type: object
+          description: 三模型就绪位
+          properties:
+            detection: { type: boolean, description: SCRFD }
+            recognition: { type: boolean, description: ArcFace }
+            landmark: { type: boolean, description: 2d106det }
+        livenessBackend: { type: string, enum: [basic, model], description: basic=OpenCV 频域兜底 }
+
+    HealthResp:
+      allOf:
+        - $ref: '#/components/schemas/Result'
+        - type: object
+          properties:
+            data: { $ref: '#/components/schemas/HealthData' }
+
+    ChallengeStartReq:
+      type: object
+      additionalProperties: false
+      required: [baselineFrame]
+      properties:
+        baselineFrame:
+          type: string
+          description: |
+            Base64 JPEG，**指令出现之前**采集的中性帧。
+            缺失或其中检不到人脸时服务端降级，不拒绝请求。
+        deviceHash: { type: string, maxLength: 64 }
+
+    ChallengeStartData:
+      type: object
+      required: [challengeId, action, instruction, windowMs, minFrames, baselineDegraded, expiresIn]
+      properties:
+        challengeId: { type: string, example: c_8f2a1b }
+        action:
+          type: string
+          enum: [MOUTH_ONCE, MOUTH_TWICE]
+          description: ★ 只有这两个，白名单见 contracts/enums/actions.json
+        instruction: { type: string, example: 请连着张两次嘴，每次约半秒 }
+        windowMs: { type: integer, example: 3000 }
+        minFrames: { type: integer, example: 8 }
+        baselineDegraded:
+          type: boolean
+          description: true = 基线不可得，已退回序列首帧。**不影响签到能否成功**
+        expiresIn: { type: integer, example: 60 }
+        needCount: { type: integer, description: 需要完成的动作次数 }
+        className: { type: string }
+        courseName: { type: string }
+
+    ChallengeStartResp:
+      allOf:
+        - $ref: '#/components/schemas/Result'
+        - type: object
+          properties:
+            data: { $ref: '#/components/schemas/ChallengeStartData' }
+
+    FrameData:
+      type: object
+      properties:
+        accepted: { type: boolean, description: false = 乱序或过期帧，已丢弃 }
+        seq: { type: integer }
+        progress: { type: number, format: double, minimum: 0, maximum: 1 }
+        hint: { type: string, nullable: true, example: 请张嘴 }
+        detectedCount: { type: integer, description: 当前已检测到的动作次数 }
+        requiredCount: { type: integer }
+        faceCount: { type: integer, description: 计入拦截的脸数（≥90px） }
+        smallFacesIgnored: { type: integer, description: 小于尺寸下限、未计入拦截的脸数 }
+
+    FrameResp:
+      allOf:
+        - $ref: '#/components/schemas/Result'
+        - type: object
+          properties:
+            data: { $ref: '#/components/schemas/FrameData' }
+
+    GateResult:
+      type: object
+      properties:
+        passed: { type: boolean }
+        value: { type: number, format: double, nullable: true, description: 实际测量值 }
+        threshold: { type: number, format: double, nullable: true, description: 生效阈值 }
+
+    FinishData:
+      type: object
+      properties:
+        passed: { type: boolean }
+        attendanceId: { type: integer, format: int64, nullable: true }
+        status:
+          type: string
+          enum: [PRESENT, LATE]
+          nullable: true
+          description: 通过时为 PRESENT 或 LATE（由 late_after_sec 决定）
+        checkinAt: { type: string, format: date-time, nullable: true }
+        similarity: { type: number, format: double, nullable: true, description: 1:N 比对 top1 相似度 }
+        rejectGate:
+          type: string
+          nullable: true
+          enum: [liveness, identity, action_count, multi_face, no_face, match]
+        retryLeft: { type: integer }
+        baselineDegraded: { type: boolean }
+        gates:
+          type: object
+          description: 三道门禁逐项结果，失败时用于定位是误拒还是真拒
+          properties:
+            liveness: { $ref: '#/components/schemas/GateResult' }
+            identity: { $ref: '#/components/schemas/GateResult' }
+            actionCount:
+              allOf:
+                - $ref: '#/components/schemas/GateResult'
+                - type: object
+                  properties:
+                    detected: { type: integer }
+                    required: { type: integer }
+
+    FinishResp:
+      allOf:
+        - $ref: '#/components/schemas/Result'
+        - type: object
+          properties:
+            data: { $ref: '#/components/schemas/FinishData' }
+
+    QualityDetail:
+      type: object
+      properties:
+        laplacian: { type: number, format: double }
+        brightness: { type: number, format: double }
+        faceWidth: { type: integer }
+        faceHeight: { type: integer }
+        yaw: { type: number, format: double, nullable: true }
+        pitch: { type: number, format: double, nullable: true }
+        qualityScore: { type: number, format: double }
+
+    EnrollSampleData:
+      type: object
+      properties:
+        passed: { type: boolean }
+        reasons:
+          type: array
+          description: 不通过的原因，前端据此给具体引导
+          items:
+            type: string
+            enum: [BLURRY, TOO_DARK, TOO_BRIGHT, FACE_TOO_SMALL, YAW_TOO_LARGE, PITCH_TOO_LARGE, MULTI_FACE, NO_FACE, DUPLICATE]
+        advice: { type: string, nullable: true, example: 往亮处站一点，别背光 }
+        sampleKey:
+          type: string
+          nullable: true
+          description: 通过时返回已加密存储的对象键，凑够 5~10 张后一并提交到 /mobile/face/enroll
+        quality: { $ref: '#/components/schemas/QualityDetail' }
+
+    EnrollSampleResp:
+      allOf:
+        - $ref: '#/components/schemas/Result'
+        - type: object
+          properties:
+            data: { $ref: '#/components/schemas/EnrollSampleData' }
