@@ -9,6 +9,17 @@
 
 ### Added
 - 工程基线（B0）：CI、密钥扫描、pre-commit、PR/Issue 模板、`docs/` 三个子目录、七个模块骨架。
+- 数据库结构（B1）：15 张表全量 DDL、幂等 seed（含 33 条阈值配置）、单管理员生成列约束、
+  申诉 PENDING 唯一约束。
+- 接口契约（B1）：`java-api`（51 个操作）、`face-api`（5 个）、`internal`（5 个）、
+  `agent-tools`（31 个工具定义，L0=9/L1=5/L2=14/L3=3）。
+- 枚举与错误码（B1）：4 份 JSON，33 个错误码，9 组状态机，2 个启用动作。
+- 契约断言（B1）：`check-contract.sh`（D7 班级课程解耦）、`check-agent-tools.py`（工具分级与字段白名单），
+  均已接入 CI 的 `contract` job。
+- `docs/change-request/CR-001`：应到名单快照缺口，待裁决。
+
+### Changed
+- CI 新增 `contract` job，带 MySQL service，任何契约违规都会红灯。
 
 ## [2.0.0-doc] - 2026-11-18
 
