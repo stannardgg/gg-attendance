@@ -1,0 +1,47 @@
+{
+  "$comment": "动作可测性白名单。★ 只有这两个动作，眨眼/转头/点头在 v2.0 明确禁用（§4.4.1）。新增动作前必须先跑 scripts/probe_action.py 量出分离度 ≥3 倍标准差，否则不得上线。",
+  "version": "1.0.0",
+  "frozen": true,
+  "actions": [
+    {
+      "code": "MOUTH_ONCE",
+      "label": "张嘴一次",
+      "instruction": "请张一次嘴，约半秒",
+      "need": 1,
+      "windowMs": 2000,
+      "minFrames": 8,
+      "enabled": true,
+      "criterion": {
+        "metric": "mouth_roi_dark_ratio",
+        "base": "min(基线帧嘴区暗度, 序列最低嘴区暗度)",
+        "segmentMinFrames": 2,
+        "absRise": 0.05,
+        "riseRatio": 1.45
+      }
+    },
+    {
+      "code": "MOUTH_TWICE",
+      "label": "张嘴两次",
+      "instruction": "请连着张两次嘴，每次约半秒",
+      "need": 2,
+      "windowMs": 3000,
+      "minFrames": 8,
+      "enabled": true,
+      "criterion": {
+        "metric": "mouth_roi_dark_ratio",
+        "base": "min(基线帧嘴区暗度, 序列最低嘴区暗度)",
+        "segmentMinFrames": 2,
+        "absRise": 0.05,
+        "riseRatio": 1.45
+      },
+      "note": "窗口 3.0s / 12 帧；实际收到 <10 帧时返回「网络不稳，请重试」而不判失败（§4.4.3）"
+    }
+  ],
+  "disabled": [
+    { "code": "BLINK", "reason": "4fps 采样率抓不住 100~300ms 的眨眼，是采样定理问题，调参无解" },
+    { "code": "TURN_LEFT", "reason": "2d106det 是形状回归器，会把偏转归一化掉，偏 20° 指标只变 0.03~0.05" },
+    { "code": "TURN_RIGHT", "reason": "同上" },
+    { "code": "NOD", "reason": "同上" }
+  ],
+  "constraint": "★ 全局约束：关键点只用于定位 ROI，判动作用 ROI 内的亮度统计。任何用关键点开合比/角度做判据的实现都违背 v2.0（§4.4.1）"
+}

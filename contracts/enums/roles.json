@@ -1,0 +1,32 @@
+{
+  "$comment": "角色枚举。三端（DB VARCHAR / Java enum / TS 联合类型）必须使用同一组字面量，全大写。事实来源：项目文档.md §2.2 D8、§3.1、§6.6",
+  "version": "1.0.0",
+  "frozen": true,
+  "values": [
+    {
+      "code": "ADMIN",
+      "label": "管理员",
+      "description": "系统唯一。可维护教师、教师授权范围、系统配置、审计。不参与签到。",
+      "unique": true,
+      "constraint": "account 表由生成列 admin_singleton + uk_single_admin 保证全库仅一条"
+    },
+    {
+      "code": "TEACHER",
+      "label": "教师",
+      "description": "由 ADMIN 创建。可见范围受 teacher_scope 限制。可发起签到、处理申诉、维护班级与课程。",
+      "unique": false,
+      "constraint": "不得由自身或其他教师创建，只能 ADMIN 创建"
+    },
+    {
+      "code": "STUDENT",
+      "label": "学生",
+      "description": "由教师导入 + 自助激活。只能看本人数据。",
+      "unique": false,
+      "constraint": "student.account_id 唯一；未激活时 account_id 为 NULL"
+    }
+  ],
+  "deniedRoleCreation": {
+    "ADMIN": "FA-1005",
+    "note": "任何 role=ADMIN 的创建请求直接 FA-1005 并写审计（§9.3）"
+  }
+}

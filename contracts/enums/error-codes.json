@@ -1,0 +1,67 @@
+{
+  "$comment": "错误码表（锁定）。★ 前端只按 code 分支，不解析 message 文案；message 仅作兜底展示。新增码必须走 CR，不得私自扩展号段。事实来源：项目文档.md §6.3",
+  "version": "1.0.0",
+  "frozen": true,
+  "envelope": {
+    "success": { "code": "FA-0000", "http": 200 },
+    "shape": {
+      "code": "string，形如 FA-dddd",
+      "message": "string，人读文案",
+      "data": "object|null",
+      "traceId": "string，12 位十六进制"
+    },
+    "rule": "code != 'FA-0000' 即失败，HTTP 状态码同时语义化"
+  },
+  "domains": {
+    "FA-0xxx": "通用",
+    "FA-1xxx": "认证与权限",
+    "FA-2xxx": "组织（班级/课程/学生/教师）",
+    "FA-3xxx": "签到",
+    "FA-4xxx": "人脸",
+    "FA-5xxx": "申诉",
+    "FA-6xxx": "Agent",
+    "FA-9xxx": "系统"
+  },
+  "codes": [
+    { "code": "FA-0000", "http": 200, "domain": "通用", "message": "ok" },
+
+    { "code": "FA-1001", "http": 401, "domain": "认证", "message": "账号或密码错误", "note": "不区分「账号不存在」与「密码错误」，防账号探测（§7.3）" },
+    { "code": "FA-1002", "http": 401, "domain": "认证", "message": "登录已过期，请重新登录" },
+    { "code": "FA-1003", "http": 403, "domain": "认证", "message": "权限不足", "note": "角色不匹配，或访问了超出 teacher_scope 的资源" },
+    { "code": "FA-1004", "http": 409, "domain": "认证", "message": "账号已存在" },
+    { "code": "FA-1005", "http": 403, "domain": "认证", "message": "不允许注册管理员账号", "note": "任何 role=ADMIN 的创建请求直接拒绝并写审计（§9.3）" },
+
+    { "code": "FA-2001", "http": 404, "domain": "组织", "message": "资源不存在", "note": "学生/教师/班级/课程；含「发起签到缺 classId 或 courseId」的情形（§14.3 WP-04）" },
+    { "code": "FA-2002", "http": 409, "domain": "组织", "message": "编码重复", "note": "学号/工号/课程编码" },
+    { "code": "FA-2003", "http": 409, "domain": "组织", "message": "班级码或班级名称重复" },
+    { "code": "FA-2004", "http": 400, "domain": "组织", "message": "该班级或课程已归档，不能发起签到" },
+    { "code": "FA-2005", "http": 409, "domain": "组织", "message": "班级下仍有在读学生，请先转出或归档", "note": "响应 data 必须带 studentCount（§14.3 WP-03）" },
+    { "code": "FA-2006", "http": 403, "domain": "组织", "message": "你未被授权该班级或该课程", "note": "发起签到要求班级与课程同时命中（§3.1）" },
+
+    { "code": "FA-3001", "http": 409, "domain": "签到", "message": "签到会话已结束" },
+    { "code": "FA-3002", "http": 400, "domain": "签到", "message": "二维码已失效，请重新扫码", "note": "不区分「过期」与「伪造」，避免探测（§9.4）" },
+    { "code": "FA-3003", "http": 409, "domain": "签到", "message": "你已完成签到，无需重复", "note": "由 uk_att_session_student 的 DuplicateKeyException 转换而来（§9.3）" },
+    { "code": "FA-3004", "http": 403, "domain": "签到", "message": "你不在本次签到的班级中" },
+    { "code": "FA-3005", "http": 429, "domain": "签到", "message": "重试次数过多，请稍后再试或提交申诉", "note": "每会话每人 3 次（MAX_RETRY_PER_SESSION）" },
+
+    { "code": "FA-4001", "http": 400, "domain": "人脸", "message": "未检测到人脸", "note": "连续 3 帧无脸才判，单帧不判（§10.2）" },
+    { "code": "FA-4002", "http": 400, "domain": "人脸", "message": "只能留下一个人进行签到", "note": "仅计宽度 ≥ MULTI_FACE_MIN_PX(90px) 的脸，连续 3 帧才触发（§4.5）" },
+    { "code": "FA-4003", "http": 400, "domain": "人脸", "message": "动作未完成", "note": "data.hint 必须带「只检测到 N 次，要求 M 次」这类具体数值（§4.4.3）" },
+    { "code": "FA-4004", "http": 400, "domain": "人脸", "message": "活体检测未通过", "note": "门禁1：多帧活体概率中位数 < LIVENESS_THRESHOLD" },
+    { "code": "FA-4005", "http": 400, "domain": "人脸", "message": "人脸不匹配", "note": "1:N 比对 top1 < REVIEW_THRESHOLD，或 MARGIN 不足" },
+    { "code": "FA-4006", "http": 400, "domain": "人脸", "message": "人脸档案未通过审核", "note": "face_profile.status != ACTIVE 时禁止签到（D5）" },
+    { "code": "FA-4007", "http": 400, "domain": "人脸", "message": "身份校验未通过，请本人操作", "note": "门禁2：首末帧向量余弦 < IDENTITY_SIM，拦「中途换人」" },
+
+    { "code": "FA-5001", "http": 409, "domain": "申诉", "message": "该记录已有待处理申诉", "note": "数据库侧由 uk_appeal_pending 生成列兜底" },
+    { "code": "FA-5002", "http": 403, "domain": "申诉", "message": "该申诉不在你的处理范围内" },
+
+    { "code": "FA-6001", "http": 409, "domain": "Agent", "message": "该操作需人工确认，已返回预览与确认令牌", "note": "★ 这是正常流程不是错误：响应含 preview + confirmToken + expiresAt（§11.5）" },
+    { "code": "FA-6002", "http": 400, "domain": "Agent", "message": "确认令牌已过期，请重新发起" },
+    { "code": "FA-6003", "http": 409, "domain": "Agent", "message": "参数已变更，需重新确认", "note": "重算 paramsHash 与令牌绑定的不一致，防「确认 A 执行 B」" },
+    { "code": "FA-6004", "http": 403, "domain": "Agent", "message": "超出当前授权范围", "note": "角色/数据范围/能力级别任一不满足" },
+    { "code": "FA-6005", "http": 400, "domain": "Agent", "message": "该操作不支持撤销，需人工处理" },
+
+    { "code": "FA-9001", "http": 500, "domain": "系统", "message": "服务内部错误", "note": "不得把堆栈或 SQL 暴露给前端" },
+    { "code": "FA-9002", "http": 503, "domain": "系统", "message": "人脸服务暂不可用", "note": "Python 不可达时由 Java 返回；Python 侧 Java 不可达时同样用它，不得返回 500（§14.3 WP-07）" }
+  ]
+}

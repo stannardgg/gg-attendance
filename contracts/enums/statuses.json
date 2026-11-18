@@ -1,0 +1,106 @@
+{
+  "$comment": "全部状态枚举。每一个都对应数据库列的实际取值域，改这里等于改契约。事实来源：项目文档.md §4.2、§4.3、§5.3、§5.3.1、§9.3",
+  "version": "1.0.0",
+  "frozen": true,
+  "enums": {
+    "accountStatus": {
+      "column": "account.status",
+      "values": ["ACTIVE", "DISABLED"],
+      "default": "ACTIVE",
+      "transitions": {
+        "ACTIVE": ["DISABLED"],
+        "DISABLED": ["ACTIVE"]
+      }
+    },
+    "teacherStatus": {
+      "column": "teacher.status",
+      "values": ["ACTIVE", "DISABLED"],
+      "default": "ACTIVE"
+    },
+    "studentStatus": {
+      "column": "student.status",
+      "values": ["ACTIVE", "TRANSFERRED", "ARCHIVED"],
+      "default": "ACTIVE",
+      "$comment": "只有 ACTIVE 计入应到名单。TRANSFERRED = 转班后留在原班的旧状态；ARCHIVED = 毕业/退学"
+    },
+    "orgStatus": {
+      "column": "class_group.status / course.status",
+      "values": ["ACTIVE", "ARCHIVED"],
+      "default": "ACTIVE",
+      "$comment": "ARCHIVED 不能用于发起签到（FA-2004），历史记录仍可查（§5.3.1）"
+    },
+    "sessionStatus": {
+      "column": "checkin_session.status",
+      "values": ["ACTIVE", "CLOSED", "CANCELLED"],
+      "initial": "ACTIVE",
+      "transitions": {
+        "ACTIVE": ["CLOSED", "CANCELLED"],
+        "CLOSED": [],
+        "CANCELLED": []
+      },
+      "$comment": "CLOSED 与 CANCELLED 都是终态。CLOSED 会批量补 ABSENT；CANCELLED 不产生任何考勤（§4.2）"
+    },
+    "attendanceStatus": {
+      "column": "attendance.status",
+      "values": ["PRESENT", "LATE", "ABSENT", "LEAVE", "EXEMPT"],
+      "initial": null,
+      "$comment": "创建会话时不预写任何行；记录在 commit（PRESENT/LATE）、关闭（ABSENT）、教师手动（LEAVE/EXEMPT）三种时机产生",
+      "appealable": ["ABSENT"],
+      "$comment_appealable": "只有 ABSENT 能被申诉覆盖为 PRESENT（§4.3）；LATE 可由教师手动改",
+      "countsAsPresent": ["PRESENT", "LATE"],
+      "$comment_rate": "签到率 = (PRESENT + LATE) / 应到人数；LEAVE/EXEMPT 不进分子但进分母（§11.7）"
+    },
+    "appealStatus": {
+      "column": "appeal.status",
+      "values": ["PENDING", "APPROVED", "REJECTED", "WITHDRAWN"],
+      "initial": "PENDING",
+      "transitions": {
+        "PENDING": ["APPROVED", "REJECTED", "WITHDRAWN"],
+        "APPROVED": [],
+        "REJECTED": [],
+        "WITHDRAWN": []
+      },
+      "$comment": "仅 PENDING 可撤回（§4.3）。同一 attendance 只允许一条 PENDING，由 uk_appeal_pending 兜底"
+    },
+    "faceProfileStatus": {
+      "column": "face_profile.status",
+      "values": ["NONE", "PENDING_REVIEW", "ACTIVE", "REJECTED"],
+      "initial": "NONE",
+      "transitions": {
+        "NONE": ["PENDING_REVIEW"],
+        "PENDING_REVIEW": ["ACTIVE", "REJECTED"],
+        "REJECTED": ["PENDING_REVIEW"],
+        "ACTIVE": ["PENDING_REVIEW"]
+      },
+      "$comment": "只有 ACTIVE 允许签到，否则 FA-4006（§6.3）。ACTIVE 允许重新采集，重新走审核"
+    },
+    "rejectGate": {
+      "column": "attendance.reject_gate",
+      "values": ["liveness", "identity", "action_count", "multi_face", "no_face", "match"],
+      "$comment": "★ 小写。这不是状态枚举而是归因标签，取值与项目文档 §13.2 逐字一致，勿改成大写",
+      "mapsToErrorCode": {
+        "liveness": "FA-4004",
+        "identity": "FA-4007",
+        "action_count": "FA-4003",
+        "multi_face": "FA-4002",
+        "no_face": "FA-4001",
+        "match": "FA-4005"
+      }
+    },
+    "scopeType": {
+      "column": "teacher_scope.scope_type",
+      "values": ["CLASS", "COURSE"],
+      "$comment": "★ 只有这两种。授权表不是业务关联表，它不会让班级与课程产生依赖（D7、§5.3）"
+    },
+    "configValueType": {
+      "column": "sys_config.value_type",
+      "values": ["INT", "DECIMAL", "BOOL", "STRING", "JSON"],
+      "default": "STRING"
+    },
+    "configCategory": {
+      "column": "sys_config.category",
+      "values": ["FACE", "CHECKIN", "AGENT", "SYSTEM"],
+      "default": "FACE"
+    }
+  }
+}
