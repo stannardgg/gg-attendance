@@ -122,13 +122,25 @@ jobs:
           python -m pip install --quiet pyyaml
           python contracts/scripts/check-agent-tools.py
 
-      - name: 空库建表 + 契约断言（D7 班级与课程解耦）
+      - name: 空库 flyway migrate（Gate：迁移脚本必须能在空库跑通）
         shell: bash
         run: |
           set -euo pipefail
-          mysql -h127.0.0.1 -P3306 -uroot -pgate -e "CREATE DATABASE face_gate DEFAULT CHARSET utf8mb4;"
-          mysql -h127.0.0.1 -P3306 -uroot -pgate face_gate < db/migration/V1__schema.sql
-          MYSQL_HOST=127.0.0.1 MYSQL_PORT=3306 MYSQL_USER=root MYSQL_PASSWORD=gate MYSQL_DATABASE=face_gate \
+          mysql -h127.0.0.1 -P3306 -uroot -pgate -e "CREATE DATABASE face_flyway DEFAULT CHARSET utf8mb4;"
+          docker run --rm --network host \
+            -v "$PWD/db/migration:/flyway/sql:ro" \
+            flyway/flyway:9 \
+            -url="jdbc:mysql://127.0.0.1:3306/face_flyway?allowPublicKeyRetrieval=true&useSSL=false" \
+            -user=root -password=gate \
+            -locations=filesystem:/flyway/sql \
+            -connectRetries=30 \
+            migrate
+
+      - name: 契约断言（D7 班级与课程解耦）
+        shell: bash
+        run: |
+          set -euo pipefail
+          MYSQL_HOST=127.0.0.1 MYSQL_PORT=3306 MYSQL_USER=root MYSQL_PASSWORD=gate MYSQL_DATABASE=face_flyway \
             ./contracts/scripts/check-contract.sh
 
   java:
