@@ -181,7 +181,7 @@ S6 推进
 
 | Batch | 注入内容 |
 |:--:|---|
-| **B0** | ① 仓库根有 `Cleaned_CASIA_FaceV5/`（约 198MB、3.2 万张人脸图），首次提交前必须确认已被排除：`git status --porcelain \| wc -l` 不应因它膨胀，`git ls-files \| grep -iE "casia\|\.onnx\|\.env$"` 必须无输出。② 远端目标 `stannardgg/gg-attendance`（私有）。③ CI 必须包含密钥扫描，并验证"故意提交假密钥能让 CI 失败"。④ 只建骨架与规范，不写任何业务逻辑、不建表。⑤ 把 `agent.md` 与本文件提到的台账规则一并纳入首次提交。⑥ 本机无 `gh` CLI：把"人工建私有仓库 + `git remote add`"列为**待人工执行**的前置项，其余工作先本地完成，不要因此停批。 |
+| **B0** | ① 仓库根有 `Cleaned_CASIA_FaceV5/`（约 198MB、3.2 万张人脸图），首次提交前必须确认已被排除：`git status --porcelain \| wc -l` 不应因它膨胀，`git ls-files \| grep -iE "casia\|\.onnx\|\.env$"` 必须无输出。② 远端目标 `stannardgg/gg-attendance`（公开）。③ CI 必须包含密钥扫描，并验证"故意提交假密钥能让 CI 失败"。④ 只建骨架与规范，不写任何业务逻辑、不建表。⑤ 把 `agent.md` 与本文件提到的台账规则一并纳入首次提交。⑥ 本机无 `gh` CLI：把"人工建公开仓库 + `git remote add`"列为**待人工执行**的前置项，其余工作先本地完成，不要因此停批。 |
 | **B1** | ① 本批**只读** `项目文档.md`，不得修改它。② 只产出 DDL / `seed.sql` / 三份 OpenAPI / 枚举 / 错误码 / 断言脚本，不实现任何 Controller/Service。③ 断言脚本必须能拦住 `course.class_id` 与 `course_student` 残留。④ 完成后打 `contract-v1`，此后契约变更只走 CR。 |
 | **B2** | ① 不给 `course` 加任何班级字段，不建"课程-班级"映射（D7）。② 教师数据范围用 `teacher_scope` + `@DataScope`，必须验证"教师 A 查不到教师 B 的班级/课程/学生"。③ 删除仍有学生的班级必须拒绝（`FA-2005` 并提示学生数）。④ CSV 导入按 1000 行验收。⑤ 不碰签到、二维码、人脸推理，不改前端。 |
 | **B3** | ① 动作库只用可测性白名单（`MOUTH_ONCE` / `MOUTH_TWICE`），**不要用眨眼/转头做测试**（4fps 采样会丢失）。② 必须实现指令前基线帧 `baselineFrame` 与"连续段"判据，并跑基线污染专项。③ 三道硬门禁为 AND 关系，含首末帧身份一致性。④ 挑战状态存 Redis，4 worker 跨进程验证。⑤ 不写业务库、不改 Java、不做界面。 |
