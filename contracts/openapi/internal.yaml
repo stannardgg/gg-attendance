@@ -13,6 +13,7 @@ info:
     Agent 的写操作也必须经这里的 `confirmToken` 流程落库（§1.2、§2.2 D8）。
   license:
     name: 内部项目
+    url: https://github.com/stannardgg/gg-attendance
 servers:
   - url: /
     description: 容器网络，不对外
@@ -367,8 +368,12 @@ components:
       properties:
         field: { type: string }
         label: { type: string, description: 中文字段名，直接给确认卡展示 }
-        before: { nullable: true }
-        after: { nullable: true }
+        before:
+          type: string
+          description: 变更前的值（已字符串化，确认卡直接渲染）
+        after:
+          type: string
+          description: 变更后的值（已字符串化）
 
     ActionPreview:
       type: object
