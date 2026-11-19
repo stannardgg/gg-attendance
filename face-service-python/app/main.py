@@ -70,6 +70,15 @@ def _startup():
         n = index().load_json(idx_path)
         logger.info("向量库加载 %d 条（%s）", n, idx_path)
 
+    # 向量快照同步（CR-002）：每 60 秒全量拉取并替换索引。
+    # FA_SYNC_ENABLED=0 可关闭（如本机没有 Java 在跑时做算法实验）。
+    if os.getenv("FA_SYNC_ENABLED", "1") != "0":
+        from app.index.sync import VectorSync
+        sync = VectorSync(index(), settings.java.base_url, settings.java.internal_token)
+        sync.start_background(interval=float(os.getenv("FA_SYNC_INTERVAL", "60")))
+        logger.info("向量同步已启动（Java=%s，间隔 %ss）",
+                    settings.java.base_url, os.getenv("FA_SYNC_INTERVAL", "60"))
+
 
 @app.exception_handler(ModelUnavailable)
 async def _model_unavailable(request: Request, exc: ModelUnavailable):

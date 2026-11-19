@@ -22,6 +22,11 @@
 - CI 新增 `contract` job，带 MySQL service，任何契约违规都会红灯。
 - Java job 升级为带 MySQL+Redis service，跑 `mvn -Pintegration verify`（单测+集成测试）。
 
+### Added（CR-002）
+- 契约新增 `GET /internal/face/vectors`（向量全量快照，CR-002 批准）
+- Java：InternalVectorController + InternalTokenFilter；学生删除同步清理向量
+- Python：60 秒轮询全量替换索引，拉取失败保旧索引
+
 ### Added（B3）
 - 人脸服务 `face-service-python`：四模型引擎（SCRFD/ArcFace/2d106det/MiniFASNet）、
   动作计数（固定 ROI + 连续段）、挑战状态机（Redis）、三道门禁、FastAPI 五端点。

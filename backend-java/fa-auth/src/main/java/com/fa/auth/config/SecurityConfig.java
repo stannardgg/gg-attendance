@@ -4,6 +4,7 @@ import com.fa.auth.security.JwtAuthFilter;
 import com.fa.common.api.Result;
 import com.fa.common.error.ErrorCode;
 import com.fa.common.security.JwtUtil;
+import com.fa.common.web.InternalTokenFilter;
 import com.fa.common.web.TraceIdFilter;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.servlet.http.HttpServletResponse;
@@ -64,6 +65,20 @@ public class SecurityConfig {
         return bean;
     }
 
+    /**
+     * /internal/** 的令牌校验。放在 JWT 过滤器之前：
+     * 内部调用方没有登录态，先于 Spring Security 放行/拦截，语义更直接。
+     */
+    @Bean
+    public FilterRegistrationBean<InternalTokenFilter> internalTokenFilter(
+            @Value("${app.internal.token:dev-internal-token}") String token) {
+        FilterRegistrationBean<InternalTokenFilter> bean =
+                new FilterRegistrationBean<>(new InternalTokenFilter(token));
+        bean.setOrder(Ordered.HIGHEST_PRECEDENCE + 10);
+        bean.addUrlPatterns("/internal/*");
+        return bean;
+    }
+
     @Bean
     public SecurityFilterChain filterChain(HttpSecurity http, JwtAuthFilter jwtAuthFilter,
                                            ObjectMapper objectMapper) throws Exception {
@@ -79,6 +94,9 @@ public class SecurityConfig {
                                 "/actuator/health",
                                 "/error",
                                 "/v3/api-docs/**").permitAll()
+                        // /internal/** 不对公网暴露（§6.4），鉴权交给 InternalTokenFilter
+                        // 而不是 JWT——它的消费方是 Python/Agent 服务，没有用户登录态。
+                        .requestMatchers("/internal/**").permitAll()
                         .anyRequest().authenticated())
                 .exceptionHandling(eh -> eh
                         .authenticationEntryPoint((req, res, ex) ->
