@@ -48,3 +48,9 @@ minio-data/
 *.pt
 models/*.onnx
 !models/README.md
+
+# face-service-python
+face-service-python/models/
+face-service-python/**/__pycache__/
+face-service-python/.venv/
+face-service-python/reports/*.png
