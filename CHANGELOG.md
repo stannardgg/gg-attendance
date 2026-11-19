@@ -35,6 +35,28 @@
 - `scripts/probe_attack.py`：照片攻击拒绝率 96.0%（原始照片 100%）。
 - `docs/change-request/CR-002`：向量下发端点缺失，待裁决。
 
+### Added（B4）
+- Java 签到内核：`fa-checkin`（会话创建/关闭、二维码 HMAC 轮换、签到 commit、考勤调整、申诉处理）。
+- 组织模块 `fa-org`：班级 / 课程 / 学生 / 教师 / 授权范围 CRUD，CSV 批量导入（逐行校验、已成功行不回滚）。
+- 21 项 HTTP 冒烟转 CI，审计切面统一写 `audit_log`。
+
+### Added（B5）
+- **Agent 后端 `fa-agent`（新模块）**：`/internal/agent/**` 三端点（catalog / tools / undo）、
+  一次性确认令牌（60s、`GETDEL` 单次消费、`paramsHash` 绑定参数、落库只存 SHA-256）、
+  `agent_action_log` 留痕与 30 分钟撤销窗口、`AGENT_LEVEL_*` 四级开关（15s 缓存）。
+- **Agent 服务 `agent-service`**：LangGraph 7 节点编排（intake/router/planner/tool/verify/confirm/answer）、
+  `interrupt()` 人机回环、串行工具调用（8s 超时、5xx 重试 1 次、FA-6004 不重试）、
+  自研 Redis 检查点（KV+ZSET，24h TTL，Redis 不可用降级 MemorySaver）、Streamlit 界面壳与确认卡。
+- **管理端 `admin-web`**：13 个页面（登录/概览/班级/课程/学生/教师授权/场次列表/发起签到四步/
+  二维码大屏/考勤/申诉/智能助手/审计/配置），路由守卫 + 按钮级权限，大屏 WebSocket 实时 +1。
+- **移动端 `mobile-web`**：8 个页面（登录/激活/首页/扫码入口/采集/人脸采集/申诉/我的），
+  采集状态机（BASELINE→CAPTURING）、固定 4fps 本地节奏 + 串行上传队列（上限 4 帧）、
+  §7.4.1 六类真机约束逐条落地（设备枚举先于开流、断流直接重连、黑屏分级重连 ≤2 次、
+  探测与校验同参数、成功冷却 6s / 失败递增退避、change 事件屏蔽）。
+- `docs/change-request/CR-004~CR-008`：检查点后端 / 名称解析缺口 / sso 兑换端点 /
+  会话详情端点 / 移动端探测端点，均待追认。
+- `docs/handover/WP-09.md`、`WP-10.md`、`WP-11.md`。
+
 ## [2.0.0-doc] - 2026-11-18
 
 文档层面的大版本，无运行时代码。
