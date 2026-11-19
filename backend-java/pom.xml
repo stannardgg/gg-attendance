@@ -33,6 +33,8 @@
     <module>fa-org</module>
     <module>fa-auth</module>
     <module>fa-checkin</module>
+    <module>fa-agent</module>
+    <module>fa-system</module>
     <module>fa-bootstrap</module>
   </modules>
 
@@ -99,6 +101,16 @@
       <dependency>
         <groupId>com.fa</groupId>
         <artifactId>fa-checkin</artifactId>
+        <version>${project.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>com.fa</groupId>
+        <artifactId>fa-agent</artifactId>
+        <version>${project.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>com.fa</groupId>
+        <artifactId>fa-system</artifactId>
         <version>${project.version}</version>
       </dependency>
     </dependencies>

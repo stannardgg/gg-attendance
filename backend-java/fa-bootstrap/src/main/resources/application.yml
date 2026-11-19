@@ -59,6 +59,13 @@ app:
     admin-username: ${BOOTSTRAP_ADMIN_USERNAME:admin}
     # 留空则首次启动不自动创建管理员（更安全，需要显式配置）
     admin-password: ${BOOTSTRAP_ADMIN_PASSWORD:Admin@12345}
+  agent:
+    # 确认令牌有效期：契约与文档均为 60 秒（§11.5）
+    confirm-ttl-seconds: ${CONFIRM_TTL_SEC:60}
+    # 撤销窗口：默认 30 分钟（§11.5 第 5 道闸）
+    undo-window-seconds: ${UNDO_WINDOW_SEC:1800}
+    # Agent 服务对浏览器的地址，用于拼 iframe/新标签页的 SSO 链接
+    public-url: ${AGENT_PUBLIC_URL:http://localhost:8501}
 
 management:
   endpoints:
