@@ -1,4 +1,6 @@
 # gitleaks 误报白名单：每行一条 fingerprint（commit:file:rule:line）
 # Sec-WebSocket-Key 的值是 RFC 6455 §4.2.1 的握手示例 nonce（"the sample nonce"
-# 的 base64），不是密钥；源码已改为运行时 base64 生成，但历史 commit 仍会被扫到。
+# 的 base64），不是密钥；永久放行见 .gitleaks.toml 的 allowlist（与 SHA 无关）。
+# 下面两条是历史 finding 的 fingerprint（PR 分支与 main 各一个 SHA）。
 d00698ef407e14aabb47138781f4be43ab12f1ac:deploy/scripts/verify-nginx.sh:generic-api-key:97
+92309978f4d69dda6b794ba1bfe365a2f3c9737e:deploy/scripts/verify-nginx.sh:generic-api-key:97
