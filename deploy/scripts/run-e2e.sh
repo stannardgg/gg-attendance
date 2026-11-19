@@ -47,6 +47,24 @@ recreate_face() {                       # 让新阈值生效
   return 1
 }
 
+ensure_nginx() {                        # e2e 依赖 nginx healthy，先自愈一遍。
+  # 背景：git rebase/checkout 会重写工作区文件，macOS 下 nginx.conf 的单文件
+  # bind mount 会悬空（容器内 No such file）→ healthcheck 连挂 → e2e 起不来。
+  local st
+  st=$(docker inspect -f '{{.State.Health.Status}}' \
+       "$("${COMPOSE[@]}" ps -q nginx 2>/dev/null)" 2>/dev/null || echo missing)
+  if [ "$st" != "healthy" ]; then
+    echo "nginx 状态 ${st} → 自动重建（若刚做过 git rebase，这是挂载失效自愈）"
+    "${COMPOSE[@]}" up -d --force-recreate nginx >/dev/null
+    for _ in $(seq 1 60); do
+      st=$(docker inspect -f '{{.State.Health.Status}}' "$("${COMPOSE[@]}" ps -q nginx)" 2>/dev/null || echo starting)
+      [ "$st" = "healthy" ] && break
+      sleep 2
+    done
+    [ "$st" = "healthy" ] || { echo "nginx 未在 120 秒内 healthy" >&2; return 1; }
+  fi
+}
+
 run_phase() {                           # run_phase <a|b> <marker-expr> <junit>
   local tag="$1" expr="$2" xml="$3"
   echo ""
@@ -61,6 +79,7 @@ run_phase() {                           # run_phase <a|b> <marker-expr> <junit>
 if [ "${1:-}" != "" ] && [ "$1" = "-k" ]; then
   # 调试模式：单阶段，用当前 .env 的阈值
   with_liveness "$(grep '^LIVENESS_THRESHOLD=' .env | cut -d= -f2)"
+  ensure_nginx
   recreate_face
   "${COMPOSE[@]}" run --rm -T e2e \
     python -m pytest /e2e -q -p no:cacheprovider --tb=short -k "$2"
@@ -68,6 +87,7 @@ if [ "${1:-}" != "" ] && [ "$1" = "-k" ]; then
 fi
 
 with_liveness 0
+ensure_nginx
 recreate_face
 run_phase a "not high_liveness" results-a.xml
 
