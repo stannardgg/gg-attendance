@@ -231,18 +231,25 @@ jobs:
         if: always()
         working-directory: backend-java
         run: |
-          set -euo pipefail
-          for f in */target/site/jacoco/jacoco.csv; do
-            [ -f "$f" ] || continue
-            echo "::group::$f"
-            head -1 "$f"
-            tail -n +2 "$f" | awk -F, '{im+=$4; ic+=$5; bm+=$6; bc+=$7; lm+=$8; lc+=$9} END {
-              printf "指令覆盖 %.1f%%, 分支覆盖 %.1f%%, 行覆盖 %.1f%%\n",
-                (im+ic)>0 ? 100*ic/(im+ic) : 0,
-                (bm+bc)>0 ? 100*bc/(bm+bc) : 0,
-                (lm+lc)>0 ? 100*lc/(lm+lc) : 0 }' "$f"
-            echo "::endgroup::"
-          done
+          python3 - <<'PY'
+          import csv, glob, os
+          files = sorted(glob.glob("*/target/site/jacoco/jacoco.csv"))
+          if not files:
+              print("没有找到 jacoco 报告（测试可能未产出覆盖率）")
+              raise SystemExit(0)
+          for path in files:
+              im = ic = bm = bc = lm = lc = 0
+              with open(path, newline="", encoding="utf-8") as fh:
+                  for row in csv.DictReader(fh):
+                      im += int(row["INSTRUCTION_MISSED"]); ic += int(row["INSTRUCTION_COVERED"])
+                      bm += int(row["BRANCH_MISSED"]);      bc += int(row["BRANCH_COVERED"])
+                      lm += int(row["LINE_MISSED"]);        lc += int(row["LINE_COVERED"])
+              def pct(covered, missed):
+                  total = covered + missed
+                  return f"{100.0 * covered / total:.1f}%" if total else "n/a"
+              module = path.split(os.sep)[0]
+              print(f"{module:16s} 指令 {pct(ic, im):>6s}  分支 {pct(bc, bm):>6s}  行 {pct(lc, lm):>6s}")
+          PY
 
   python:
     name: Python 静态检查与单测
