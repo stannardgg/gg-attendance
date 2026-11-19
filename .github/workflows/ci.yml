@@ -234,6 +234,9 @@ jobs:
           python3 - <<'PY'
           import csv, glob, os
           files = sorted(glob.glob("*/target/site/jacoco/jacoco.csv"))
+          agg = "fa-bootstrap/target/site/jacoco-aggregate/jacoco.csv"
+          if os.path.exists(agg):
+              files = [agg] + [f for f in files if f != agg]
           if not files:
               print("没有找到 jacoco 报告（测试可能未产出覆盖率）")
               raise SystemExit(0)

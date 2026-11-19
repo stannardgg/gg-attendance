@@ -56,6 +56,26 @@
       </plugin>
 
       <!--
+        跨模块覆盖率聚合。
+        为什么需要：集成测试全部跑在 fa-bootstrap 的进程里，它们覆盖的是
+        fa-auth / fa-org 的代码。各模块自己的 jacoco 报告只统计本模块的 test，
+        所以 fa-auth 单看只有 1%（它本来就没几个单测）。聚合后才能看到真实数字。
+      -->
+      <plugin>
+        <groupId>org.jacoco</groupId>
+        <artifactId>jacoco-maven-plugin</artifactId>
+        <executions>
+          <execution>
+            <id>aggregate-report</id>
+            <phase>verify</phase>
+            <goals>
+              <goal>report-aggregate</goal>
+            </goals>
+          </execution>
+        </executions>
+      </plugin>
+
+      <!--
         把仓库根的 db/migration 复制进 classpath。
         这样 Flyway 用 classpath:db/migration 就能读写到迁移脚本：
           - 本地 mvn spring-boot:run 能读到
