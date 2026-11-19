@@ -1,0 +1,59 @@
+"""Agent 图状态（§11.3）。
+
+用 `TypedDict` 而不是 dataclass：LangGraph 的检查点是按字段合并的，
+dataclass 实例在反序列化时会因为版本差异报错，dict 更宽容。
+"""
+
+from __future__ import annotations
+
+from typing import Any, TypedDict
+
+
+class AgentState(TypedDict, total=False):
+    # 输入
+    query: str
+    token: str
+    user: dict[str, Any]
+    conversation_id: str
+
+    # 会话内上下文
+    intent: str             # chitchat | query | draft | action | blocked
+    blocked_reason: str
+    forced: dict[str, Any] | None   # 快捷问句带来的固定工具调用（不依赖 LLM）
+
+    # 编排
+    plan: list[dict[str, Any]]
+    steps: int
+    tool_results: list[dict[str, Any]]
+    citations: list[dict[str, Any]]
+
+    # 写操作
+    pending: dict[str, Any] | None
+    confirm_approved: bool
+    last_action_log_id: int | None
+    undoable_until: str | None
+
+    # 输出
+    answer: str
+    error: str | None
+
+
+def new_state(query: str, token: str, user: dict[str, Any],
+              forced: dict[str, Any] | None = None) -> AgentState:
+    return AgentState(
+        query=query,
+        token=token,
+        user=user,
+        intent="",
+        blocked_reason="",
+        forced=forced,
+        plan=[],
+        steps=0,
+        tool_results=[],
+        citations=[],
+        pending=None,
+        last_action_log_id=None,
+        undoable_until=None,
+        answer="",
+        error=None,
+    )

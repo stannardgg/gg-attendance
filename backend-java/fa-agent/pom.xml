@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <parent>
+    <groupId>com.fa</groupId>
+    <artifactId>face-attendance</artifactId>
+    <version>0.2.0-SNAPSHOT</version>
+  </parent>
+
+  <artifactId>fa-agent</artifactId>
+  <name>fa-agent</name>
+  <description>Agent 工具执行层：工具目录、两阶段确认、留痕与撤销（§11.5 五道闸）</description>
+
+  <!--
+    为什么工具实现放在 Java 而不是 Agent 进程里（§11.4）：
+    ① 数据范围只有 Java 侧有 teacher_scope 的完整视图，Agent 传给 Server 的 userId 不可信；
+    ② 写操作必须保持「Java 单一写入口」，撤销才有统一的事务边界；
+    ③ 工具目录由服务端下发，Agent 无法自行扩权。
+
+    依赖方向：agent → {checkin, org} → infra → common。
+    agent 直接依赖 checkin 是因为 L2 工具要复用 SessionService/AppealService 的生命周期逻辑，
+    重写一份 SQL 会让两处各自漂移（与 fa-auth → fa-org 的取舍同理，见 docs/handover/WP-02.md）。
+  -->
+  <dependencies>
+    <dependency>
+      <groupId>com.fa</groupId>
+      <artifactId>fa-checkin</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-web</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-validation</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-aop</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.commons</groupId>
+      <artifactId>commons-csv</artifactId>
+    </dependency>
+  </dependencies>
+</project>

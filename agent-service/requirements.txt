@@ -1,0 +1,8 @@
+# Agent 服务依赖（§11.6）
+# 版本钉死到已验证的组合：langgraph 1.2.x 需要 langgraph-checkpoint >=4.3,<5
+langgraph==1.2.22
+langgraph-checkpoint==4.3.2
+streamlit==1.67.0
+httpx==0.28.1
+redis==8.1.0
+pytest==9.2.0
