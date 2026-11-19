@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <parent>
+    <groupId>com.fa</groupId>
+    <artifactId>face-attendance</artifactId>
+    <version>0.2.0-SNAPSHOT</version>
+  </parent>
+
+  <artifactId>fa-auth</artifactId>
+  <name>fa-auth</name>
+  <description>认证与账号：登录 / 刷新 / 登出 / 学生激活 / RBAC / 教师 CRUD</description>
+
+  <dependencies>
+    <!--
+      刻意依赖 fa-org：学生激活要按「学号+姓名+班级码」查 student 表。
+      详见根 pom 的说明与 docs/handover/WP-02.md。
+    -->
+    <dependency>
+      <groupId>com.fa</groupId>
+      <artifactId>fa-org</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-web</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-security</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-validation</artifactId>
+    </dependency>
+  </dependencies>
+</project>
