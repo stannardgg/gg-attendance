@@ -5,7 +5,7 @@
 
 批次完成标记（`batch-N-done`）与版本 tag 是两套，不写入本文件；本文件只记**可交付版本**。
 
-## [Unreleased]
+## [1.0.0-rc] - 2026-11-19（B0~B5 全部内容）
 
 ### Added
 - 工程基线（B0）：CI、密钥扫描、pre-commit、PR/Issue 模板、`docs/` 三个子目录、七个模块骨架。
@@ -84,6 +84,50 @@
   补 `_RENAME` / `_SESSION_COUNT` 规则与疑问词护栏。
 - 前端 `vite dev` 的依赖预构建要批量删缓存，沙箱拦删除导致 dev server 起不来 → 抽出共用 `proxy` 同时挂
   `server` 与 `preview`，用 `vite preview` 验收。
+
+## [1.0.0] - 2026-11-19
+
+首个可交付版本：B0~B6 全部批次。B0~B5 内容见下方各段，B6（部署与验收）如下。
+
+### Added（B6）
+
+- **`deploy/` 六服务编排**：mysql / redis / java / face / agent / nginx，`e2e` 验收容器
+  （`profiles: [test]`）。三份多阶段 Dockerfile（maven→JRE、python-slim、node→nginx 静态），
+  构建上下文 3.2GB→40MB。绑定目录（`deploy/data`）便于宿主机备份。
+- **nginx 单点入口**：TLS 1.2+、HTTP→HTTPS 301、HSTS/nosniff/referrer、gzip、
+  `/face-api/` 8MB 上限 + 10r/s 限流、WebSocket 升级透传、`/agent/` 去 X-Frame-Options。
+- **运维脚本八件套**：`gen-tls` / `healthcheck` / `wait-healthy` / `verify-coldstart`（冷启动计时 Gate）/ 
+  `verify-nginx`（14 项逐条断言）/ `backup`+`restore`（sha256 校验 + 独立库恢复比对）/
+  `run-e2e`（两阶段执行器）。
+- **`tests/e2e/` 18 条系统级验收**（对应文档 16.3）+ 30 并发压测 + 60 行最小 WS 客户端 +
+  身份轮换（DUPLICATE 规避 + 动作可测性预检）。
+- **`POST /mobile/face/enroll`**：移动端人脸建档（PENDING_REVIEW + face_vector）。
+- **`FA_CHALLENGE_TTL_SEC`**：挑战 TTL 可配（默认 60 = 契约值），供按推理容量调整。
+
+### Changed（B6）
+
+- **大屏 WS 鉴权后置**：`GET /admin/sessions/*/live` 从 `authenticated()` 改为放行，
+  鉴权由握手后 `LiveWsConfig.authorized()`（验签+角色+黑名单）完成——浏览器 WS 无法带
+  Authorization 头，JWT 只能走 query（契约如此）。
+- **动作提示白名单（CR-010）**：`_pick_action(hint)` 只在 `FA_ALLOW_ACTION_HINT=1` 且
+  hint 在白名单内时生效，生产默认关闭；契约外动作码直接拒绝。
+- `gzip_min_length` 1024→256（SPA index.html 只有几百字节）。
+
+### Fixed（B6）
+
+18 场景 E2E 与 30 并发压测暴露的真实缺陷：
+
+- **大屏 WS 从未连通**：`SecurityConfig` 拦截 `/live` 路径（见 Changed）。
+- **`join` 不校验二维码**：`qrToken` 无 `@Valid` 也无 `qr.verify`，伪造/过期码能进挑战。补 FA-3002。
+- **学生端班级/课程名恒 null**：`jdbc.queryForObject` 误用 RowMapper lambda，改 `jdbc.query`。
+- **申诉创建无实时推送**：`AppealService` afterCommit 推 `EVT_APPEAL_CREATED`，大屏弹提示。
+- **审计缺前后状态**：`AuditWriter.write(before, after)` 摘要，申诉审批留 PENDING→APPROVED。
+- **基线污染误拒**：基线帧已张嘴时动作计数器基线虚高 → 正常签到被判 FA-4003。
+  `MouthActionCounter` 增加一次性基线自愈。
+- **引擎懒加载无锁**：多线程并发首次 `load_all()` 互相覆盖拿 None；加载半失败后
+  `_registry` 永久半赋值。双检锁 + 加载完才赋全局。
+- 验收工具十余处：macOS bash 3.2 的 `declare -A` / `$var（全角` 兼容、curl h2 测不了 WS
+  握手（改标准库 socket）、`gzip_min_length`、压测脚本引用旧 API 等（详见 `B6-验收报告.md` §3）。
 
 ## [2.0.0-doc] - 2026-11-18
 
