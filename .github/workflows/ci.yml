@@ -177,10 +177,34 @@ jobs:
             ./contracts/scripts/check-contract.sh
 
   java:
-    name: Java 编译与单测
+    name: Java 编译 / 单测 / 集成测试
     needs: detect
     if: needs.detect.outputs.java == 'true'
     runs-on: ubuntu-latest
+    # 集成测试要真实 MySQL + Redis。本机 docker run 不可用（会被沙箱杀掉），
+    # 所以 B2 起把这条链路的验证放在 CI，与 B1 处理 flyway 的思路一致。
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: gate
+          MYSQL_DATABASE: face_attendance
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -uroot -pgate --silent"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=30
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd="redis-cli ping"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
@@ -188,8 +212,37 @@ jobs:
           distribution: temurin
           java-version: '17'
           cache: maven
-      - name: mvn verify
-        run: mvn -B -ntp -f backend-java/pom.xml verify
+
+      - name: 单测 + 集成测试
+        working-directory: backend-java
+        env:
+          DB_HOST: 127.0.0.1
+          DB_PORT: '3306'
+          DB_NAME: face_attendance
+          DB_USER: root
+          DB_PASSWORD: gate
+          REDIS_HOST: 127.0.0.1
+          REDIS_PORT: '6379'
+          JWT_SECRET: ci-only-secret-0123456789abcdefghijklmnop
+          BOOTSTRAP_ADMIN_PASSWORD: Admin@12345
+        run: mvn -B -ntp -Pintegration verify
+
+      - name: 覆盖率摘要
+        if: always()
+        working-directory: backend-java
+        run: |
+          set -euo pipefail
+          for f in */target/site/jacoco/jacoco.csv; do
+            [ -f "$f" ] || continue
+            echo "::group::$f"
+            head -1 "$f"
+            tail -n +2 "$f" | awk -F, '{im+=$4; ic+=$5; bm+=$6; bc+=$7; lm+=$8; lc+=$9} END {
+              printf "指令覆盖 %.1f%%, 分支覆盖 %.1f%%, 行覆盖 %.1f%%\n",
+                (im+ic)>0 ? 100*ic/(im+ic) : 0,
+                (bm+bc)>0 ? 100*bc/(bm+bc) : 0,
+                (lm+lc)>0 ? 100*lc/(lm+lc) : 0 }' "$f"
+            echo "::endgroup::"
+          done
 
   python:
     name: Python 静态检查与单测
