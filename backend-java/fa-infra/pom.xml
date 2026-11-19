@@ -15,6 +15,11 @@
   <description>基础设施：MyBatis-Plus / Redis / Flyway / 数据源 / WebSocket</description>
 
   <dependencies>
+    <!-- 审计切面需要 AspectJ（fa-checkin 已引 starter-aop，但 infra 要能独立编译） -->
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-aop</artifactId>
+    </dependency>
     <dependency>
       <groupId>com.fa</groupId>
       <artifactId>fa-common</artifactId>
