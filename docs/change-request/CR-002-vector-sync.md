@@ -2,7 +2,7 @@
 
 - 提出人：WP-05（B3 实现）
 - 提出日期：2026-11-19
-- 状态：**待裁决**
+- 状态：✅ **已批准并实现**（2026-11-19 业主批准）
 - 阻塞范围：B3 的 enroll 落库、B4 的签到比对真实数据
 - 严重度：高（B3 当前的向量库只能用 JSON 文件喂测试数据）
 
@@ -50,4 +50,24 @@ POST /internal/face/vectors/remove
 
 | 日期 | 裁决人 | 结论 | 落地动作 |
 |---|---|---|---|
-| — | — | 待裁决 | — |
+| 2026-11-19 | 业主 | ✅ 批准 | 见下「实现说明」 |
+
+## 实现说明（与原建议的偏离）
+
+批准后实现时做了一处**简化**：只加了 `GET /internal/face/vectors`（全量快照），
+原建议的「增量游标 `since` + `POST /internal/face/vectors/remove`」没有实现。
+
+理由：
+1. **删除传播**：全量替换天然覆盖删除（学生删了，下次拉取就不在快照里），
+   不需要单独的删除通知端点，也不需要「谁调用 remove」的答案；
+2. **自愈性**：Python 侧索引状态漂移（崩溃恢复、部分写坏）会被下一次全量替换自动修正，
+   增量方案做不到；
+3. **流量**：512 维向量按 base64 传，1000 名学生约 1MB / 60 秒，完全可接受；
+   增量省下的流量换不来它多出的复杂度（游标管理、漏删风险）。
+
+落地清单：
+- 契约：`internal.yaml` 新增 `VectorSnapshot` / `FaceVectorItem`（Redocly 校验通过）
+- Java：`InternalVectorController`（fa-org，只读）+ `InternalTokenFilter`（fa-common，
+  常量时间比较）+ SecurityConfig 放行 `/internal/**`；学生删除时同步清理 face_vector
+- Python：`app/index/sync.py`（60s 轮询全量替换，失败保旧索引）+ 4 个测试
+- 测试：`VectorSyncIT`（CI 真库）覆盖 401 / 快照内容 / 删除传播

@@ -179,6 +179,8 @@ public class StudentService {
         }
         studentMapper.deleteById(id);
         jdbc.update("delete from face_profile where student_id = ?", id);
+        // 向量也要清：否则下一次快照拉取仍会把它发给 Python，被删学生还能被认出来
+        jdbc.update("delete from face_vector where student_id = ?", id);
         audit.write("STUDENT_DELETE", "STUDENT", id, "删除学生 " + entity.getStudentNo());
         return new ClassDtos.DeleteResult(id, false);
     }

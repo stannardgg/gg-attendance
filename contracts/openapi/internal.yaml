@@ -79,6 +79,27 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '409': { $ref: '#/components/responses/Conflict' }
 
+  /internal/face/vectors:
+    get:
+      tags: [face-internal]
+      summary: 人脸向量快照（全量，CR-002）
+      description: |
+        供 Python 的 1:N 索引刷新（CR-002，2026-11-19 批准）。
+
+        - 只返回「学生状态为 ACTIVE」的向量；学生被删除/归档后，下一次拉取自然消失；
+        - `vector` 是 float32 小端序、已 L2 归一化的 base64（512 维 = 2048 字节 → 约 2732 字符）；
+        - 1000 名学生约 1MB，Python 每 60 秒拉一次做**全量替换**；
+        - 评审时的「增量游标 + 删除通知」简化成了全量快照：删除传播由下一次替换天然覆盖，
+          快照还有自愈性（Python 侧状态漂移会自动修正）。流量（1MB/分钟）不构成问题。
+      operationId: internalFaceVectors
+      responses:
+        '200':
+          description: 当前生效的向量快照
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/VectorSnapshot' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+
   /internal/agent/tools/catalog:
     get:
       tags: [agent-internal]
@@ -219,6 +240,37 @@ components:
           schema: { $ref: '#/components/schemas/ErrorResult' }
 
   schemas:
+    FaceVectorItem:
+      type: object
+      required: [studentId, vector, dim, qualityScore]
+      properties:
+        studentId:
+          type: integer
+          format: int64
+        vector:
+          type: string
+          description: float32 小端序、L2 归一化后的 base64；长度必须等于 dim*4/3*4（即 2048 字节的 base64）
+        dim:
+          type: integer
+          description: 维度，当前恒为 512
+        qualityScore:
+          type: number
+          format: float
+          description: 采集时的综合质量分（0~1）
+    VectorSnapshot:
+      type: object
+      required: [count, serverTime, vectors]
+      properties:
+        count:
+          type: integer
+          description: vectors 数组长度（冗余字段，便于校验完整性）
+        serverTime:
+          type: string
+          format: date-time
+        vectors:
+          type: array
+          items: { $ref: '#/components/schemas/FaceVectorItem' }
+
     Result:
       type: object
       required: [code, message, traceId]
