@@ -129,7 +129,7 @@ async function savePatch() {
 
 /* ---------------- 导出 ---------------- */
 
-async function exportCsv() {
+async function exportXlsx() {
   try {
     const blob = await api.download('/api/v1/admin/attendance/export', {
       sessionId: query.sessionId,
@@ -141,10 +141,10 @@ async function exportCsv() {
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
     a.href = url
-    a.download = `attendance-${new Date().toISOString().slice(0, 10)}.csv`
+    a.download = `attendance-${new Date().toISOString().slice(0, 10)}.xlsx`
     a.click()
     URL.revokeObjectURL(url)
-    ElMessage.success('已导出')
+    ElMessage.success('已导出（缺勤学生整行红底高亮）')
   } catch (err) {
     ElMessage.error(messageOf(err))
   }
@@ -179,7 +179,7 @@ onMounted(async () => {
   <div class="page">
     <div class="page-head">
       <h2>考勤查询</h2>
-      <el-button @click="exportCsv">导出 CSV</el-button>
+      <el-button @click="exportXlsx">导出 Excel</el-button>
     </div>
 
     <el-card shadow="never">

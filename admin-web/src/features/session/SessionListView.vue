@@ -91,15 +91,16 @@ async function rotate(row: SessionRow) {
   }
 }
 
-async function exportCsv(row: SessionRow) {
+async function exportXlsx(row: SessionRow) {
   try {
     const blob = await api.download('/api/v1/admin/attendance/export', { sessionId: row.id })
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
     a.href = url
-    a.download = `${row.className || 'class'}-${row.title}-${row.startAt.slice(0, 10)}.csv`
+    a.download = `${row.className || 'class'}-${row.title}-${row.startAt.slice(0, 10)}.xlsx`
     a.click()
     URL.revokeObjectURL(url)
+    ElMessage.success('已导出（缺勤学生整行红底高亮）')
   } catch (err) {
     ElMessage.error(messageOf(err))
   }
@@ -188,7 +189,7 @@ onMounted(() => {
             <el-button link type="primary" @click="router.push(`/attendance?sessionId=${row.id}`)">名单</el-button>
             <el-button v-if="row.status === 'ACTIVE'" link type="primary" @click="rotate(row)">换码</el-button>
             <el-button v-if="row.status === 'ACTIVE'" link type="warning" @click="close(row)">结束</el-button>
-            <el-button link type="primary" @click="exportCsv(row)">导出</el-button>
+            <el-button link type="primary" @click="exportXlsx(row)">导出 Excel</el-button>
           </template>
         </el-table-column>
         <template #empty>

@@ -937,7 +937,7 @@ paths:
   /api/v1/admin/attendance/export:
     get:
       tags: [admin-attendance]
-      summary: 导出 CSV
+      summary: 导出 Excel（缺勤行高亮）
       operationId: exportAttendance
       parameters:
         - name: sessionId
@@ -957,10 +957,10 @@ paths:
           schema: { type: string, format: date }
       responses:
         '200':
-          description: CSV 文件（UTF-8 BOM，Excel 直接可读）
+          description: Excel 文件（.xlsx），缺勤（ABSENT）学生整行红底高亮
           content:
-            text/csv:
-              schema: { type: string }
+            application/vnd.openxmlformats-officedocument.spreadsheetml.sheet:
+              schema: { type: string, format: binary }
 
   # ===================================================================
   # admin · 申诉
