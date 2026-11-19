@@ -106,6 +106,9 @@ async function submit() {
   } catch (err) {
     if (err instanceof ApiError && err.code === 'FA-4002') {
       showToast('画面里有多个人，请单独拍摄')
+    } else if (err instanceof ApiError && err.code === 'FA-1003') {
+      // 只会在登录态不是学生时出现（登录页/路由守卫已拦，这里是最后防线）
+      showToast('当前账号没有采集权限，请退出后用学号重新登录')
     } else {
       showToast(messageOf(err))
     }

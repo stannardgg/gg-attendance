@@ -5,6 +5,44 @@
 
 批次完成标记（`batch-N-done`）与版本 tag 是两套，不写入本文件；本文件只记**可交付版本**。
 
+## [Unreleased]
+
+### Changed
+- 考勤导出由 CSV 改为 Excel（.xlsx）：`GET /api/v1/admin/attendance/export` 响应类型更换，
+  前端按钮改为「导出 Excel」，文件名 `attendance-<日期>.xlsx`。缺勤（ABSENT）学生整行
+  红底高亮（浅红底 ROSE + 深红字 DARK_RED），其余行无底色；表头冻结、列宽固定。
+  CSV 是纯文本存不了颜色，此为用户裁决的格式替换，非并留双端点。
+- `fa-checkin` 新增依赖 `poi-ooxml 5.5.1`（父 pom 统一管版本）。
+
+### Added
+- `fa-checkin` 单测 `AttendanceExportXlsxTest`：不碰数据库，直接断言 ABSENT 行
+  SOLID_FOREGROUND + ROSE 底色 + 深红字，PRESENT/LATE 行无底色。
+
+## [1.0.1] - 2026-11-19
+
+### Fixed
+
+- **移动端人脸采集提交报「权限不足」且无后续**（v1.0.0 部署版实测）：教师/管理员账号在 `/m/login`
+  登录后能一路走到采集页并采满 5 张样本，直到最后一步提交才被 Java 端
+  `@PreAuthorize("hasRole('STUDENT')")` 以 403 FA-1003 拒绝，用户感知为"权限不足 + 没反应"。
+  根因是移动端登录页 / 路由守卫 / 首页入口均不区分角色。三处修复（纯前端）：
+  - 登录成功后发现非 STUDENT → 立即登出并提示「移动端仅限学生使用，请用学号登录」（`LoginView.vue`）；
+  - 路由守卫对非公开路由校验角色，覆盖 localStorage 里残留的教师旧令牌（`router/index.ts`）；
+  - 采集提交捕获 FA-1003 时给出可行动文案（`EnrollView.vue`，最后防线）。
+
+### 排查记录（踩过的坑）
+
+- **face-service `/face-api/enroll/sample` 不验签**：只检查 Authorization 非空——教师/过期令牌也能
+  正常采满样本，把 403 推迟到最后一步才暴露。信任边界在 Java 侧；若要收紧需走 CR。
+- **`activate()` 不更新 `last_login_at`**：学生激活后该列保持 NULL，排查时不能拿它判断
+  "该账号是否登录过"。
+- **沙箱内 buildx 构建被拦**：`docker compose build` 报 `failed to update builder last activity time:
+  rename .../.docker/buildx/activity/... operation not permitted`；`DOCKER_BUILDKIT=0` 走经典
+  builder 可通过。
+- **前端改动的快速验证链路**：`npm run build` → `docker cp dist/. fa-nginx-1:/usr/share/nginx/html/m/`
+  即可热替换生效；`docker compose restart` 不会还原它（只有 `up -d --build` / `--force-recreate`
+  才会从镜像重建），适合先验证再重建镜像。
+
 ## [1.0.0-rc] - 2026-11-19（B0~B5 全部内容）
 
 ### Added
