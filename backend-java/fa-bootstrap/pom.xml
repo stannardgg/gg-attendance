@@ -32,6 +32,17 @@
       <artifactId>spring-security-test</artifactId>
       <scope>test</scope>
     </dependency>
+    <!--
+      集成测试要 POST 带 body 并断言 401。JDK 自带的 HttpURLConnection 在
+      「流式写入请求体 + 收到 401」时会抛 HttpRetryException（cannot retry due to
+      server authentication），这是 JDK 的已知行为，不是服务端问题。
+      换 Apache HttpClient 才能正常拿到 401 的响应体。
+    -->
+    <dependency>
+      <groupId>org.apache.httpcomponents.client5</groupId>
+      <artifactId>httpclient5</artifactId>
+      <scope>test</scope>
+    </dependency>
   </dependencies>
 
   <build>
