@@ -2,7 +2,7 @@
 import { ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { showToast } from 'vant'
-import { login } from '@/shared/store/auth'
+import { login, logout, auth } from '@/shared/store/auth'
 import { ApiError } from '@/shared/api/client'
 import { isWeChat } from '@/shared/utils'
 
@@ -18,6 +18,14 @@ async function submit() {
   loading.value = true
   try {
     await login(studentNo.value.trim(), password.value)
+    // 移动端是学生端（/api/v1/mobile/** 只放行 STUDENT）：教师/管理员登进来
+    // 会在签到、采集等每个接口上撞 403「权限不足」。在源头就拦下并登出，
+    // 不给"能进页面但处处报错"的死路。
+    if (auth.profile && auth.profile.role !== 'STUDENT') {
+      await logout()
+      showToast('移动端仅限学生使用，请用学号登录')
+      return
+    }
     const redirect = (route.query.redirect as string) || '/'
     router.replace(redirect)
   } catch (err) {
