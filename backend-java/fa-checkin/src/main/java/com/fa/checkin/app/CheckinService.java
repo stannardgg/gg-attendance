@@ -123,7 +123,10 @@ public class CheckinService {
 
         audit.write("CHECKIN_COMMIT", "ATTENDANCE", a.getId(),
                 "签到成功 " + status + " sim=" + req.similarity());
-        return new CheckinDtos.CommitData(a.getId(), status, now, false);
+        String studentName = jdbc.query(
+                "SELECT name FROM student WHERE id = ?",
+                rs -> rs.next() ? rs.getString(1) : null, req.studentId());
+        return new CheckinDtos.CommitData(a.getId(), status, now, false, studentName);
     }
 
     /** 学生端考勤详情（按 sessionId）。 */
@@ -135,13 +138,17 @@ public class CheckinService {
             throw new BizException(ErrorCode.NOT_FOUND, "暂无签到记录");
         }
         CheckinSession s = sessionMapper.selectById(sessionId);
-        Map<Long, String> classNames = jdbc.queryForObject(
+        // ★ 这里必须是 ResultSetExtractor（一个参数），不能是 RowMapper（两个参数）。
+        // 写成 (rs, i) -> rs.next() ? ... 会被推断成 RowMapper，此时游标已经在唯一那一行上，
+        // rs.next() 直接返回 false → 返回空 Map → 学生端看到 className/courseName 全是 null。
+        // 用 jdbc.query 的单参数 lambda 才是 ResultSetExtractor，语义无歧义。
+        Map<Long, String> classNames = jdbc.query(
                 "select name from class_group where id = ?",
-                (rs, i) -> rs.next() ? Map.of(s.getClassId(), rs.getString(1)) : Map.of(),
+                rs -> rs.next() ? Map.of(s.getClassId(), rs.getString(1)) : Map.of(),
                 s.getClassId());
-        Map<Long, String> courseNames = jdbc.queryForObject(
+        Map<Long, String> courseNames = jdbc.query(
                 "select name from course where id = ?",
-                (rs, i) -> rs.next() ? Map.of(s.getCourseId(), rs.getString(1)) : Map.of(),
+                rs -> rs.next() ? Map.of(s.getCourseId(), rs.getString(1)) : Map.of(),
                 s.getCourseId());
         return new CheckinDtos.MobileAttendance(
                 a.getId(), sessionId, s.getTitle(),

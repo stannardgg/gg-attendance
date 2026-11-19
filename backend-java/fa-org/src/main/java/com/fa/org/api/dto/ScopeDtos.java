@@ -1,9 +1,11 @@
 package com.fa.org.api.dto;
 
+import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Pattern;
 import jakarta.validation.constraints.Size;
 import java.time.LocalDateTime;
+import java.util.List;
 
 /**
  * 教师授权范围 DTO。
@@ -40,6 +42,17 @@ public final class ScopeDtos {
     public record FaceReviewReq(
             @NotNull Boolean approved,
             @Size(max = 255) String rejectReason) {
+    }
+
+    /**
+     * 提交采集（契约 FaceEnrollReq）。
+     *
+     * <p>只收样本引用键，不收图片也不收向量：图片在 face 服务逐张质检，
+     * 向量由 face 服务暂存 Redis，Java 按 key 取回落库（CR-009）。
+     */
+    public record FaceEnrollReq(
+            @NotNull @Size(min = 5, max = 10) List<@NotBlank String> sampleKeys,
+            @NotBlank @Size(max = 16) String consentVersion) {
     }
 
     public record FaceStatusResp(

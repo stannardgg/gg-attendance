@@ -25,6 +25,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -49,10 +50,13 @@ public class SessionService {
     private final QrTokenService qr;
     private final ClassService classService;
     private final CourseService courseService;
+    /** 扫码链接的站点根地址。移动端挂在 nginx 的 /m/ 下，二维码指向 /checkin 短链由 nginx 跳转。 */
+    private final String mobilePublicUrl;
 
     public SessionService(SessionMapper sessionMapper, AttendanceMapper attendanceMapper,
                           JdbcTemplate jdbc, NameLookup nameLookup, AuditWriter audit,
-                          QrTokenService qr, ClassService classService, CourseService courseService) {
+                          QrTokenService qr, ClassService classService, CourseService courseService,
+                          @Value("${app.mobile.public-url:https://mobile.local}") String mobilePublicUrl) {
         this.sessionMapper = sessionMapper;
         this.attendanceMapper = attendanceMapper;
         this.jdbc = jdbc;
@@ -61,6 +65,9 @@ public class SessionService {
         this.qr = qr;
         this.classService = classService;
         this.courseService = courseService;
+        this.mobilePublicUrl = mobilePublicUrl.endsWith("/")
+                ? mobilePublicUrl.substring(0, mobilePublicUrl.length() - 1)
+                : mobilePublicUrl;
     }
 
     @DataScope
@@ -196,7 +203,7 @@ public class SessionService {
         var names = nameLookup.classNames(List.of(s.getClassId()));
         var courseNames = nameLookup.courseNames(List.of(s.getCourseId()));
         String token = qr.currentToken(s.getId(), s.getQrEpoch());
-        String url = "https://mobile.local/checkin?sid=" + s.getId() + "&tk=" + token;
+        String url = mobilePublicUrl + "/checkin?sid=" + s.getId() + "&tk=" + token;
         return new CheckinDtos.QrData(s.getId(), token, url,
                 LocalDateTime.ofInstant(qr.currentExpiresAt(), java.time.ZoneId.systemDefault()),
                 s.getQrEpoch(), names.get(s.getClassId()), courseNames.get(s.getCourseId()));

@@ -166,7 +166,10 @@ function connect() {
     retry = 0
   }
   ws.onmessage = (evt) => {
-    let msg: { type?: string; data?: { studentName?: string; status?: string } }
+    let msg: {
+      type?: string
+      data?: { studentName?: string; status?: string; reason?: string }
+    }
     try {
       msg = JSON.parse(evt.data)
     } catch {
@@ -182,6 +185,9 @@ function connect() {
       if (row) row.status = status as AttendanceRow['status']
       window.clearTimeout(rosterTimer)
       rosterTimer = window.setTimeout(loadRoster, 1200)
+    } else if (type === 'EVT_APPEAL_CREATED') {
+      // 16.3 场景 9：申诉要在 1 秒内被教师看到，不能等下次刷新列表
+      ElMessage.warning(`${msg.data?.studentName ?? '有学生'} 提交了申诉，请到「申诉」页处理`)
     } else if (type === 'EVT_SESSION_CLOSED') {
       ElMessage.info('本次签到已被结束')
       loadRoster()

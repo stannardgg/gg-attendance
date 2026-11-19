@@ -10,6 +10,8 @@
 """
 from __future__ import annotations
 
+import random
+
 import cv2
 import numpy as np
 
@@ -27,7 +29,8 @@ class ChallengeService:
         self.store = store
 
     # ---------------- start ----------------
-    def start(self, ticket: str, baseline_bgr: np.ndarray) -> dict:
+    def start(self, ticket: str, baseline_bgr: np.ndarray,
+              action_hint: str | None = None) -> dict:
         try:
             claims = parse(ticket)
         except TicketError as exc:
@@ -36,8 +39,9 @@ class ChallengeService:
         session_id = int(claims["sid"])
         student_id = int(claims["studentId"])
 
-        # 动作从白名单里选。B3 阶段固定 MOUTH_ONCE（B4 由会话上下文下发）
-        action = "MOUTH_ONCE"
+        # 动作从白名单里**随机**选（§4.4.3）：固定动作等于给预录视频一个稳定的靶子。
+        # CR-010 之前这里写死 MOUTH_ONCE，MOUTH_TWICE 从来没有跑过。
+        action = self._pick_action(action_hint)
 
         baseline_ratio: float | None = None
         degraded = True
@@ -77,13 +81,24 @@ class ChallengeService:
         return {
             "challengeId": st.challenge_id,
             "action": st.action,
-            "instruction": "请张一次嘴，约半秒",
+            "instruction": ("请张两次嘴，每次约半秒" if st.action == "MOUTH_TWICE"
+                            else "请张一次嘴，约半秒"),
             "windowMs": st.window_ms,
             "minFrames": st.min_frames,
             "baselineDegraded": st.baseline_degraded,
             "needCount": st.need,
             "expiresIn": settings.challenge.ttl_sec,
         }
+
+    def _pick_action(self, hint: str | None) -> str:
+        """随机取动作；仅当显式允许时采纳客户端 hint（CR-010）。"""
+        whitelist = settings.action.action_whitelist
+        if hint and settings.action.allow_action_hint and hint in whitelist:
+            return hint
+        if hint and hint not in whitelist:
+            # 契约外的动作码直接拒绝，避免把未知值写进 attendance.action_seq
+            raise ValueError(f"未知动作码：{hint}")
+        return random.choice(whitelist)
 
     # ---------------- frame ----------------
     def frame(self, challenge_id: str, frame_bgr: np.ndarray, seq: int) -> dict:

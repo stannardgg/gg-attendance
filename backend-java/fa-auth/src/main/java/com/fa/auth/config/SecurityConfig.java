@@ -14,6 +14,7 @@ import org.springframework.boot.web.servlet.FilterRegistrationBean;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.core.Ordered;
+import org.springframework.http.HttpMethod;
 import org.springframework.http.MediaType;
 import org.springframework.security.config.annotation.method.configuration.EnableMethodSecurity;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
@@ -97,6 +98,12 @@ public class SecurityConfig {
                         // /internal/** 不对公网暴露（§6.4），鉴权交给 InternalTokenFilter
                         // 而不是 JWT——它的消费方是 Python/Agent 服务，没有用户登录态。
                         .requestMatchers("/internal/**").permitAll()
+                        // 大屏 WebSocket：浏览器建立 WS 时**无法设置 Authorization 头**，
+                        // JWT 只能走 query（契约 /admin/sessions/{id}/live?token=）。
+                        // 这里放行握手，鉴权由 LiveWsConfig.authorized() 完成——
+                        // 它同样验签、验角色（TEACHER/ADMIN）、验黑名单，不放行等于大屏永远连不上。
+                        .requestMatchers(HttpMethod.GET, "/api/v1/admin/sessions/*/live")
+                        .permitAll()
                         .anyRequest().authenticated())
                 .exceptionHandling(eh -> eh
                         .authenticationEntryPoint((req, res, ex) ->

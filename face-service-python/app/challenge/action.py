@@ -65,9 +65,12 @@ class MouthActionCounter:
         self._seq = 0
         # 观测到的最低暗度：基线不可得时的兜底（baselineDegraded 场景）
         self._min_ratio = base_ratio
+        self._ratios: list[float] = []
+        self._rescored = False
 
     def observe(self, ratio: float) -> None:
         """喂入一帧的暗度。顺序敏感，乱序帧不应调用。"""
+        self._ratios.append(ratio)
         self._min_ratio = min(self._min_ratio, ratio)
         active = (ratio >= self.base + self.abs_rise) and (ratio >= self.base * self.rise_ratio)
         # 注：ratio 越大 = 越暗（暗像素占比升高）
@@ -87,7 +90,24 @@ class MouthActionCounter:
         self._seq += 1
 
     def result(self) -> tuple[int, list[tuple[int, int]]]:
-        """返回 (次数, 段列表)。结尾若仍在动作中，按已积累长度判定。"""
+        """返回 (次数, 段列表)。结尾若仍在动作中，按已积累长度判定。
+
+        ★ 基线自愈（16.3 场景 13「基线污染」）：start 那一帧如果正好赶上学生
+        已经张嘴，baseline_ratio 会被抬到"张嘴水平"，之后所有张嘴都涨不过它，
+        动作次数恒为 0 —— 学生明明照做了却被判 FA-4003。
+
+        判据很直接：既然序列里出现过比基线**更亮**（暗度更低）的帧，说明嘴至少
+        闭合过一次，真实的闭口基线就是那个最低值。此时用观测到的最低暗度重算一遍
+        计数。正常场景下 min ≈ baseline（甚至略高），不会触发重算，行为不变。
+        """
+        if not self._rescored and 1e-4 < self._min_ratio < self.base * 0.9:
+            self._rescored = True
+            healed = MouthActionCounter(self._min_ratio, self.abs_rise,
+                                        self.rise_ratio, self.hold_frames)
+            healed._rescored = True          # 只自愈一次，避免极小基线来回递归
+            for r in self._ratios:
+                healed.observe(r)
+            return healed.result()
         if self._in_mouth and len(self._run) >= self.hold_frames:
             return self._count + 1, self._segments + [(self._seg_start, self._seq - 1)]
         return self._count, list(self._segments)

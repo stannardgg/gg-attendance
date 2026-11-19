@@ -27,6 +27,8 @@ import org.springframework.dao.DuplicateKeyException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 /**
  * 申诉流转。刻意放宽了契约的一句：
@@ -47,16 +49,18 @@ public class AppealService {
     private final JdbcTemplate jdbc;
     private final AuditWriter audit;
     private final NameLookup nameLookup;
+    private final LiveBroadcaster broadcaster;
 
     public AppealService(AppealMapper appealMapper, AttendanceMapper attendanceMapper,
                          SessionMapper sessionMapper, JdbcTemplate jdbc, AuditWriter audit,
-                         NameLookup nameLookup) {
+                         NameLookup nameLookup, LiveBroadcaster broadcaster) {
         this.appealMapper = appealMapper;
         this.attendanceMapper = attendanceMapper;
         this.sessionMapper = sessionMapper;
         this.jdbc = jdbc;
         this.audit = audit;
         this.nameLookup = nameLookup;
+        this.broadcaster = broadcaster;
     }
 
     // ---------------- DTO ----------------
@@ -111,6 +115,28 @@ public class AppealService {
             throw new BizException(ErrorCode.APPEAL_EXISTS);
         }
         audit.write("APPEAL_CREATE", "APPEAL", a.getId(), "学生申诉 session=" + req.sessionId());
+        // 16.3 场景 9：教师端 1 秒内收到提醒。推到这场会话的实时通道上，
+        // 正在看大屏的教师立刻弹提示；没开大屏的教师下次进申诉列表也能看到。
+        // 必须等事务提交后再推，否则推送到了、库里却回滚，教师会去处理一条不存在的申诉。
+        Appeal saved = a;
+        String studentName = jdbc.query("SELECT name FROM student WHERE id = ?",
+                rs -> rs.next() ? rs.getString(1) : null, studentId);
+        Runnable push = () -> broadcaster.broadcast(req.sessionId(), "EVT_APPEAL_CREATED", Map.of(
+                "appealId", saved.getId(),
+                "sessionId", req.sessionId(),
+                "studentId", studentId,
+                "studentName", studentName == null ? "" : studentName,
+                "reason", req.reason()));
+        if (TransactionSynchronizationManager.isSynchronizationActive()) {
+            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+                @Override
+                public void afterCommit() {
+                    push.run();
+                }
+            });
+        } else {
+            push.run();
+        }
         return toResp(a);
     }
 
@@ -153,7 +179,6 @@ public class AppealService {
 
     /** 处理申诉：通过 → 同一事务把考勤改成 PRESENT（无记录则补建）。 */
     @Transactional
-    @com.fa.common.audit.Audited(action = "APPEAL_HANDLE", target = "APPEAL")
     public Resp handle(long id, HandleReq req) {
         Appeal a = appealMapper.selectById(id);
         if (a == null) {
@@ -162,6 +187,11 @@ public class AppealService {
         if (!"PENDING".equals(a.getStatus())) {
             throw new BizException(ErrorCode.APPEAL_EXISTS, "该申诉已处理");
         }
+        // 变更前快照：审计要能看出「PENDING + 无考勤」变成「APPROVED + PRESENT」。
+        // 不靠 @Audited 切面，因为切面只记方法入参，拿不到这两列的前后值（场景 10）。
+        String attendanceBefore = jdbc.query(
+                "SELECT status FROM attendance WHERE session_id = ? AND student_id = ?",
+                rs -> rs.next() ? rs.getString(1) : null, a.getSessionId(), a.getStudentId());
 
         if (Boolean.TRUE.equals(req.approved())) {
             Attendance att = a.getAttendanceId() == 0L ? null
@@ -200,7 +230,17 @@ public class AppealService {
         a.setHandledBy(SecurityUtils.current().accountId());
         a.setHandledAt(LocalDateTime.now());
         appealMapper.updateById(a);
-        // 审计由 @Audited 切面统一写，这里不再重复
+
+        String attendanceAfter = jdbc.query(
+                "SELECT status FROM attendance WHERE session_id = ? AND student_id = ?",
+                rs -> rs.next() ? rs.getString(1) : null, a.getSessionId(), a.getStudentId());
+        audit.write("APPEAL_HANDLE", "APPEAL", a.getId(),
+                Map.of("appealStatus", "PENDING",
+                        "attendanceStatus", attendanceBefore == null ? "NONE" : attendanceBefore),
+                Map.of("appealStatus", a.getStatus(),
+                        "attendanceStatus", attendanceAfter == null ? "NONE" : attendanceAfter),
+                (Boolean.TRUE.equals(req.approved()) ? "通过申诉" : "驳回申诉")
+                        + " appeal=" + a.getId() + " reply=" + req.reply());
         return toResp(a);
     }
 

@@ -39,8 +39,11 @@ public class InternalCheckinController {
         CheckinDtos.CommitData data = checkinService.commit(req);
         // 事务已提交（service 方法带 @Transactional），此时推送大屏才算数。
         // 推送失败不影响签到：broadcast 内部吞异常只记日志。
+        // studentName 必带：大屏靠它在本地名单里定位那一行并立即改色，
+        // 少了它只能整页重拉，"1 秒内 +1"就要打折扣。
         broadcaster.broadcast(req.sessionId(), "EVT_CHECKIN_SUCCESS", Map.of(
                 "studentId", req.studentId(),
+                "studentName", data.studentName() == null ? "" : data.studentName(),
                 "attendanceId", data.attendanceId(),
                 "status", data.status(),
                 "checkinAt", data.checkinAt().toString(),

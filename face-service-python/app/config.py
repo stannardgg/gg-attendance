@@ -99,13 +99,23 @@ class ActionConfig:
     window_ms_twice: int = 3000
     min_frames: int = 8
     action_whitelist: tuple = ("MOUTH_ONCE", "MOUTH_TWICE")
+    # CR-010：挑战动作允许由请求指定。**默认关闭**——动作随机是防预录视频的一道
+    # 保险，让客户端能自选动作等于把这道保险交回给攻击者。只有验收/联调环境
+    # （需要稳定复现"要求 2 次只做 1 次"这类负例）才开。
+    allow_action_hint: bool = field(
+        default_factory=lambda: _get("ALLOW_ACTION_HINT", "0") == "1")
 
 
 @dataclass
 class ChallengeConfig:
-    """挑战会话状态机（§9.4）。"""
+    """挑战会话状态机（§9.4）。
 
-    ttl_sec: int = 60
+    ttl_sec 可用 CHALLENGE_TTL_SEC 覆盖（默认 60 = 契约值）。仅压测/验收环境放宽：
+    单机 CPU 推理在 30 路并发下 finish 会排队，排队超过 TTL 的挑战会被 Redis 删掉
+    （R3 已登记的容量问题，不是业务缺陷）。
+    """
+
+    ttl_sec: int = field(default_factory=lambda: int(_get("CHALLENGE_TTL_SEC", "60")))
     max_retry_per_session: int = 3
     multi_face_frames: int = 3
     multi_face_min_px: int = 90
