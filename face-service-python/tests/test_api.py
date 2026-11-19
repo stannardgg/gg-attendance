@@ -14,6 +14,11 @@ import cv2
 import numpy as np
 import pytest
 
+from conftest import CASIA_AVAILABLE, MODELS_AVAILABLE, SKIP_NO_CASIA, SKIP_NO_MODEL
+
+pytestmark = pytest.mark.skipif(
+    not (CASIA_AVAILABLE and MODELS_AVAILABLE), reason=SKIP_NO_CASIA if not CASIA_AVAILABLE else SKIP_NO_MODEL)
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app.challenge.service import ChallengeService
