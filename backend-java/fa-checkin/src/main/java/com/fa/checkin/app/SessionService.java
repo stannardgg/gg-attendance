@@ -72,6 +72,11 @@ public class SessionService {
         var course = courseService.requireActive(req.courseId());
 
         Long teacherId = SecurityUtils.current().teacherId();
+        if (teacherId == null) {
+            // checkin_session.teacher_id 是 NOT NULL，且「谁发起的」必须可追溯。
+            // 管理员没有教师档案，不能顶替发起——需要签到就用教师账号。
+            throw new BizException(ErrorCode.FORBIDDEN, "管理员不能发起签到，请用教师账号登录");
+        }
         LocalDateTime now = LocalDateTime.now();
 
         CheckinSession s = new CheckinSession();
@@ -221,6 +226,11 @@ public class SessionService {
                 // ABSENT 优先用实际记录数；会话未关闭时还没有补缺勤，显示剩余人数更直观
                 counts.getOrDefault("ABSENT", 0L),
                 s.getClosedAt(), s.getCreatedAt());
+    }
+
+    /** 控制器取单个会话时用；不暴露实体。 */
+    public CheckinDtos.Session toRespPublic(long id) {
+        return toResp(require(id));
     }
 
     public long remainingSeconds(CheckinSession s) {
