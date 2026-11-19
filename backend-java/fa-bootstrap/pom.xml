@@ -1,0 +1,79 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <parent>
+    <groupId>com.fa</groupId>
+    <artifactId>face-attendance</artifactId>
+    <version>0.2.0-SNAPSHOT</version>
+  </parent>
+
+  <artifactId>fa-bootstrap</artifactId>
+  <name>fa-bootstrap</name>
+  <description>启动模块：配置装配、可执行 jar、数据库迁移资源</description>
+
+  <dependencies>
+    <dependency>
+      <groupId>com.fa</groupId>
+      <artifactId>fa-auth</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>com.fa</groupId>
+      <artifactId>fa-org</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.springframework.boot</groupId>
+      <artifactId>spring-boot-starter-actuator</artifactId>
+    </dependency>
+    <dependency>
+      <groupId>org.springframework.security</groupId>
+      <artifactId>spring-security-test</artifactId>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.springframework.boot</groupId>
+        <artifactId>spring-boot-maven-plugin</artifactId>
+        <configuration>
+          <mainClass>com.fa.bootstrap.FaceAttendanceApplication</mainClass>
+        </configuration>
+      </plugin>
+
+      <!--
+        把仓库根的 db/migration 复制进 classpath。
+        这样 Flyway 用 classpath:db/migration 就能读写到迁移脚本：
+          - 本地 mvn spring-boot:run 能读到
+          - 打成 jar 后也能读到（不用挂外部卷）
+          - 不用在 backend-java 下再复制一份 SQL，保持「DDL 只有一处」的契约
+      -->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-resources-plugin</artifactId>
+        <executions>
+          <execution>
+            <id>copy-db-migration</id>
+            <phase>process-resources</phase>
+            <goals><goal>copy-resources</goal></goals>
+            <configuration>
+              <outputDirectory>${project.build.outputDirectory}/db/migration</outputDirectory>
+              <resources>
+                <resource>
+                  <directory>${project.basedir}/../../db/migration</directory>
+                  <filtering>false</filtering>
+                  <includes>
+                    <include>**/*.sql</include>
+                  </includes>
+                </resource>
+              </resources>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+    </plugins>
+  </build>
+</project>
