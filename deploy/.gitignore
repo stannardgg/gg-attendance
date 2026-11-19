@@ -1,0 +1,10 @@
+# 运行时产物：证书、数据卷、日志、备份都不入库
+.env
+data/
+logs/
+backups/
+tls/*
+!tls/.gitkeep
+out/
+.env
+.env.e2e
