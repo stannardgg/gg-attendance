@@ -5,7 +5,7 @@
 
 批次完成标记（`batch-N-done`）与版本 tag 是两套，不写入本文件；本文件只记**可交付版本**。
 
-## [Unreleased]
+## [1.0.2] - 2026-11-19
 
 ### Changed
 - 考勤导出由 CSV 改为 Excel（.xlsx）：`GET /api/v1/admin/attendance/export` 响应类型更换，

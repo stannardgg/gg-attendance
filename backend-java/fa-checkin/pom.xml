@@ -44,5 +44,10 @@
       <groupId>org.springframework.boot</groupId>
       <artifactId>spring-boot-starter-aop</artifactId>
     </dependency>
+    <!-- 考勤导出 .xlsx：缺勤行整行红底高亮（CSV 纯文本存不了颜色） -->
+    <dependency>
+      <groupId>org.apache.poi</groupId>
+      <artifactId>poi-ooxml</artifactId>
+    </dependency>
   </dependencies>
 </project>

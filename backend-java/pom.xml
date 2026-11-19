@@ -46,6 +46,8 @@
     <mybatis-plus.version>3.5.7</mybatis-plus.version>
     <jjwt.version>0.12.6</jjwt.version>
     <commons-csv.version>1.11.0</commons-csv.version>
+    <!-- 5.x 最新稳定版（2025-11）；6.0.0 刚发布，暂不追新 -->
+    <poi.version>5.5.1</poi.version>
   </properties>
 
   <dependencyManagement>
@@ -76,6 +78,11 @@
         <groupId>org.apache.commons</groupId>
         <artifactId>commons-csv</artifactId>
         <version>${commons-csv.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>org.apache.poi</groupId>
+        <artifactId>poi-ooxml</artifactId>
+        <version>${poi.version}</version>
       </dependency>
 
       <dependency>

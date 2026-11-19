@@ -9,11 +9,22 @@ import com.fa.common.security.DataScope;
 import com.fa.common.security.ScopeContext;
 import com.fa.common.security.SecurityUtils;
 import com.fa.infra.audit.AuditWriter;
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
 import java.time.LocalDate;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 import java.util.Set;
+import org.apache.poi.ss.usermodel.FillPatternType;
+import org.apache.poi.ss.usermodel.HorizontalAlignment;
+import org.apache.poi.ss.usermodel.IndexedColors;
+import org.apache.poi.xssf.usermodel.XSSFCell;
+import org.apache.poi.xssf.usermodel.XSSFCellStyle;
+import org.apache.poi.xssf.usermodel.XSSFFont;
+import org.apache.poi.xssf.usermodel.XSSFRow;
+import org.apache.poi.xssf.usermodel.XSSFSheet;
+import org.apache.poi.xssf.usermodel.XSSFWorkbook;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.core.RowMapper;
 import org.springframework.stereotype.Service;
@@ -116,30 +127,130 @@ public class AttendanceQueryService {
         return PageResult.of(items, total, query);
     }
 
+    /**
+     * 导出 Excel（.xlsx）。口径与列表完全一致（同一段 where、同一排序），
+     * 否则「页面看到的」和「导出拿到的」会对不上——对账类功能最常见的不信任来源。
+     *
+     * <p>为什么不再导 CSV：CSV 是纯文本，文件里存不了任何颜色/底纹信息；
+     * 教师要求打开文件就能一眼认出缺勤学生，只能换成 Excel——缺勤（ABSENT）行整行红底高亮。
+     *
+     * <p>单场查询时以应到名单为基表，未签到的人 COALESCE 成 ABSENT（见 SELECT_FROM_EXPECTED），
+     * 缺勤的人不会因为「还没签到、没有 attendance 记录」而在导出里消失。
+     */
     @DataScope
-    public String exportCsv(Long sessionId, Long classId, Long courseId, LocalDate from, LocalDate to) {
+    public byte[] exportXlsx(Long sessionId, Long classId, Long courseId, LocalDate from, LocalDate to) {
         Filter f = filter(sessionId, classId, courseId, null, null, from, to);
-        StringBuilder sb = new StringBuilder("\uFEFF");  // BOM：Excel 直接双击不乱码
-        sb.append("学号,姓名,班级,课程,场次,状态,签到时间,相似度,活体,身份,调整原因\n");
-        if (f.blocked()) {
-            return sb.toString();
-        }
         String select = sessionId != null ? SELECT_FROM_EXPECTED : SELECT_FROM_ATTENDANCE;
-        jdbc.query(select + f.where() + " ORDER BY st.student_no", rs -> {
-            // RowCallbackHandler：游标已在当前行，写一行即可
-            sb.append(csv(rs.getString("student_no"))).append(',')
-              .append(csv(rs.getString("student_name"))).append(',')
-              .append(csv(rs.getString("class_name"))).append(',')
-              .append(csv(rs.getString("course_name"))).append(',')
-              .append(csv(rs.getString("session_title"))).append(',')
-              .append(csv(rs.getString("status"))).append(',')
-              .append(csv(fmt(rs.getTimestamp("checkin_at")))).append(',')
-              .append(csv(rs.getBigDecimal("similarity"))).append(',')
-              .append(csv(rs.getBigDecimal("liveness_median"))).append(',')
-              .append(csv(rs.getBigDecimal("identity_sim"))).append(',')
-              .append(csv(rs.getString("adjust_reason"))).append('\n');
-        }, f.args.toArray());
-        return sb.toString();
+        List<AttendanceDtos.Row> rows = f.blocked() ? List.of()
+                : jdbc.query(select + f.where() + " ORDER BY st.student_no", mapper(), f.args.toArray());
+        return toXlsx(rows);
+    }
+
+    private static final String[] XLSX_HEADERS = {
+            "学号", "姓名", "班级", "课程", "场次", "状态", "签到时间", "相似度", "活体", "身份", "调整原因"
+    };
+
+    /** 列宽（字符数 × 256），手调过：中文表头不换行、原因列够宽。 */
+    private static final int[] XLSX_WIDTHS = {12, 10, 14, 14, 22, 10, 20, 9, 9, 9, 28};
+
+    /**
+     * 生成工作簿。缺勤行用 Excel「坏值」经典配色：浅红底（ROSE）+ 深红字（DARK_RED）。
+     * 包级私有：单元测试直接喂行数据断言样式，不碰数据库。
+     */
+    static byte[] toXlsx(List<AttendanceDtos.Row> rows) {
+        try (XSSFWorkbook wb = new XSSFWorkbook();
+             ByteArrayOutputStream out = new ByteArrayOutputStream()) {
+            XSSFFont bold = wb.createFont();
+            bold.setBold(true);
+            XSSFCellStyle headerStyle = wb.createCellStyle();
+            headerStyle.setFont(bold);
+            headerStyle.setFillForegroundColor(IndexedColors.GREY_25_PERCENT.getIndex());
+            headerStyle.setFillPattern(FillPatternType.SOLID_FOREGROUND);
+            headerStyle.setAlignment(HorizontalAlignment.CENTER);
+
+            short numFmt = wb.createDataFormat().getFormat("0.0000");
+            short tsFmt = wb.createDataFormat().getFormat("yyyy-MM-dd HH:mm:ss");
+            XSSFCellStyle textStyle = wb.createCellStyle();
+            XSSFCellStyle numStyle = wb.createCellStyle();
+            numStyle.setDataFormat(numFmt);
+            XSSFCellStyle tsStyle = wb.createCellStyle();
+            tsStyle.setDataFormat(tsFmt);
+
+            XSSFFont absentFont = wb.createFont();
+            absentFont.setColor(IndexedColors.DARK_RED.getIndex());
+            XSSFCellStyle absentText = wb.createCellStyle();
+            absentText.setFont(absentFont);
+            absentText.setFillForegroundColor(IndexedColors.ROSE.getIndex());
+            absentText.setFillPattern(FillPatternType.SOLID_FOREGROUND);
+            XSSFCellStyle absentNum = wb.createCellStyle();
+            absentNum.cloneStyleFrom(absentText);
+            absentNum.setDataFormat(numFmt);
+            XSSFCellStyle absentTs = wb.createCellStyle();
+            absentTs.cloneStyleFrom(absentText);
+            absentTs.setDataFormat(tsFmt);
+
+            XSSFSheet sheet = wb.createSheet("考勤记录");
+            XSSFRow head = sheet.createRow(0);
+            for (int i = 0; i < XLSX_HEADERS.length; i++) {
+                XSSFCell cell = head.createCell(i);
+                cell.setCellValue(XLSX_HEADERS[i]);
+                cell.setCellStyle(headerStyle);
+            }
+            sheet.createFreezePane(0, 1);
+            for (int i = 0; i < XLSX_WIDTHS.length; i++) {
+                sheet.setColumnWidth(i, XLSX_WIDTHS[i] * 256);
+            }
+
+            int r = 1;
+            for (AttendanceDtos.Row row : rows) {
+                boolean absent = "ABSENT".equals(row.status());
+                // 每 cell 一个样式，样式对象全程只有固定 7 个 —— 绝不能在循环里 createCellStyle，
+                // 否则超量行会撞上 xlsx 的 64000 样式上限。
+                XSSFCellStyle[] styles = absent
+                        ? new XSSFCellStyle[]{absentText, absentText, absentText, absentText,
+                              absentText, absentText, absentTs, absentNum, absentNum, absentNum, absentText}
+                        : new XSSFCellStyle[]{textStyle, textStyle, textStyle, textStyle,
+                              textStyle, textStyle, tsStyle, numStyle, numStyle, numStyle, textStyle};
+                XSSFRow line = sheet.createRow(r++);
+                text(line, 0, row.studentNo(), styles[0]);
+                text(line, 1, row.studentName(), styles[1]);
+                text(line, 2, row.className(), styles[2]);
+                text(line, 3, row.courseName(), styles[3]);
+                text(line, 4, row.sessionTitle(), styles[4]);
+                text(line, 5, row.status(), styles[5]);
+                if (row.checkinAt() != null) {
+                    XSSFCell cell = line.createCell(6);
+                    cell.setCellValue(java.sql.Timestamp.valueOf(row.checkinAt()));
+                    cell.setCellStyle(styles[6]);
+                } else {
+                    line.createCell(6).setCellStyle(styles[6]);
+                }
+                number(line, 7, row.similarity(), styles[7]);
+                number(line, 8, row.livenessMedian(), styles[8]);
+                number(line, 9, row.identitySim(), styles[9]);
+                text(line, 10, row.adjustReason(), styles[10]);
+            }
+            wb.write(out);
+            return out.toByteArray();
+        } catch (IOException e) {
+            throw new BizException(ErrorCode.INTERNAL_ERROR, "生成 Excel 文件失败");
+        }
+    }
+
+    private static void text(XSSFRow row, int col, String value, XSSFCellStyle style) {
+        XSSFCell cell = row.createCell(col);
+        if (value != null && !value.isEmpty()) {
+            cell.setCellValue(value);
+        }
+        cell.setCellStyle(style);
+    }
+
+    private static void number(XSSFRow row, int col, Double value, XSSFCellStyle style) {
+        XSSFCell cell = row.createCell(col);
+        if (value != null) {
+            cell.setCellValue(value);
+        }
+        cell.setCellStyle(style);
     }
 
     @Transactional
@@ -236,22 +347,6 @@ public class AttendanceQueryService {
                 rs.getString("reject_gate"),
                 rs.getString("adjust_reason"),
                 nullableLong(rs, "adjusted_by"));
-    }
-
-    /** CSV 转义：逗号/引号/换行都要包起来，否则导出后列会错位。 */
-    private static String csv(Object v) {
-        if (v == null) {
-            return "";
-        }
-        String s = String.valueOf(v);
-        if (s.contains(",") || s.contains("\"") || s.contains("\n")) {
-            return "\"" + s.replace("\"", "\"\"") + "\"";
-        }
-        return s;
-    }
-
-    private static String fmt(java.sql.Timestamp ts) {
-        return ts == null ? "" : ts.toLocalDateTime().toString().replace('T', ' ');
     }
 
     private static String placeholders(int n) {

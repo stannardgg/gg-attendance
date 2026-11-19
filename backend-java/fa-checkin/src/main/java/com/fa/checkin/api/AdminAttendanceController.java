@@ -64,11 +64,12 @@ public class AdminAttendanceController {
             @RequestParam(required = false) Long courseId,
             @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate dateFrom,
             @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE) LocalDate dateTo) {
-        String csv = service.exportCsv(sessionId, classId, courseId, dateFrom, dateTo);
+        byte[] xlsx = service.exportXlsx(sessionId, classId, courseId, dateFrom, dateTo);
         return ResponseEntity.ok()
                 .header(HttpHeaders.CONTENT_DISPOSITION,
-                        "attachment; filename=\"attendance.csv\"")
-                .contentType(new MediaType("text", "csv", java.nio.charset.StandardCharsets.UTF_8))
-                .body(csv.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                        "attachment; filename=\"attendance.xlsx\"")
+                .contentType(MediaType.parseMediaType(
+                        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"))
+                .body(xlsx);
     }
 }
