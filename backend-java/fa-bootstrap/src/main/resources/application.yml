@@ -1,0 +1,75 @@
+server:
+  port: 8080
+  shutdown: graceful
+
+spring:
+  application:
+    name: face-attendance
+
+  datasource:
+    url: jdbc:mysql://${DB_HOST:127.0.0.1}:${DB_PORT:3306}/${DB_NAME:face_attendance}?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai&allowPublicKeyRetrieval=true&useSSL=false
+    username: ${DB_USER:root}
+    password: ${DB_PASSWORD:gate}
+    hikari:
+      maximum-pool-size: 20
+      minimum-idle: 2
+
+  # 迁移脚本由 fa-bootstrap 的 resources 插件从仓库根 db/migration 复制进 classpath，
+  # 保证「DDL 只有一处」——这里不需要 filesystem 路径，打 jar 后也能跑。
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+    baseline-on-migrate: false
+    validate-on-migrate: true
+
+  data:
+    redis:
+      host: ${REDIS_HOST:127.0.0.1}
+      port: ${REDIS_PORT:6379}
+      password: ${REDIS_PASSWORD:}
+      timeout: 2s
+
+  jackson:
+    time-zone: Asia/Shanghai
+    deserialization:
+      # ★ 场景 16 的关键：给课程 DTO 传 classId 必须被拒，而不是静默忽略
+      fail-on-unknown-properties: true
+
+  servlet:
+    multipart:
+      max-file-size: 8MB
+      max-request-size: 8MB
+
+mybatis-plus:
+  configuration:
+    map-underscore-to-camel-case: true
+  global-config:
+    banner: false
+
+app:
+  jwt:
+    # 至少 32 字节；生产必须通过环境变量注入，默认值只用于本地开发
+    secret: ${JWT_SECRET:local-dev-only-secret-please-change-0123456789}
+    access-ttl-seconds: ${JWT_ACCESS_TTL:1800}
+    refresh-ttl-seconds: ${JWT_REFRESH_TTL:604800}
+  bootstrap:
+    admin-username: ${BOOTSTRAP_ADMIN_USERNAME:admin}
+    # 留空则首次启动不自动创建管理员（更安全，需要显式配置）
+    admin-password: ${BOOTSTRAP_ADMIN_PASSWORD:Admin@12345}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+  endpoint:
+    health:
+      show-details: never
+
+logging:
+  level:
+    root: INFO
+    com.fa: INFO
+    org.springframework.security: WARN
+  pattern:
+    console: "%d{HH:mm:ss.SSS} %-5level [%X{traceId:-}] %logger{36} - %msg%n"
