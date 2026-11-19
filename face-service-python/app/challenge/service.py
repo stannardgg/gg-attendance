@@ -43,6 +43,13 @@ class ChallengeService:
         degraded = True
         roi: tuple[int, int, int, int] | None = None
 
+        # 基线污染专项（§4.4.3）：基线帧有多张够大的人脸 → 直接拒绝。
+        # 此时无法确定"基线"属于谁，继续做只会把 A 的基线配到 B 的脸上。
+        _faces = detector().detect(baseline_bgr)
+        _big = [f for f in _faces if f.width >= settings.challenge.multi_face_min_px]
+        if len(_big) >= 2:
+            raise TooManyFaces("基线画面中检测到多张人脸")
+
         face = detector().detect_largest(baseline_bgr)
         if face is not None:
             try:

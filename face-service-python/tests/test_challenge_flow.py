@@ -129,3 +129,31 @@ def test_finish_is_one_shot(service, face_img):
     assert "passed" in first
     with pytest.raises(LookupError):
         service.finish(cid)          # 状态已消费
+
+
+def test_baseline_pollution_multi_face_rejected(service, face_img):
+    """基线污染专项：基线帧有多张脸 → start 直接 400，不创建会话。"""
+    ticket = tickets.issue(1, 106, "jti-pollute")
+    two = np.full((720, 1280, 3), 90, dtype=np.uint8)
+    small = cv2.resize(face_img, (320, 320))
+    two[200:520, 200:520] = small
+    two[200:520, 700:1020] = small
+    with pytest.raises(TooManyFaces):
+        service.start(ticket, two)
+
+
+def test_baseline_missing_degrades(service, face_img):
+    """基线无脸 → 降级为序列首帧（baselineDegraded=True），链路照常走完。"""
+    ticket = tickets.issue(1, 107, "jti-degrade")
+    blank = np.full((720, 1280, 3), 90, dtype=np.uint8)
+    info = service.start(ticket, blank)
+    assert info["baselineDegraded"] is True
+
+    cid = info["challengeId"]
+    for seq in range(6):
+        service.frame(cid, composite(face_img), seq=seq)
+    result = service.finish(cid)
+    assert result["baselineDegraded"] is True
+    assert result["frames"] == 6
+    # 降级后基线取自首帧，静态序列的动作门禁依然失败
+    assert result["gates"]["actionCount"]["passed"] is False

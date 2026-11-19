@@ -20,6 +20,15 @@
 
 ### Changed
 - CI 新增 `contract` job，带 MySQL service，任何契约违规都会红灯。
+- Java job 升级为带 MySQL+Redis service，跑 `mvn -Pintegration verify`（单测+集成测试）。
+
+### Added（B3）
+- 人脸服务 `face-service-python`：四模型引擎（SCRFD/ArcFace/2d106det/MiniFASNet）、
+  动作计数（固定 ROI + 连续段）、挑战状态机（Redis）、三道门禁、FastAPI 五端点。
+- `scripts/calibrate.py`：CASIA 100 人标定，契约默认 0.45 实测 FAR/FRR 均 0.000%。
+- `scripts/probe_action.py`：动作探针（真人视频模式 + 合成自检 3/3）。
+- `scripts/probe_attack.py`：照片攻击拒绝率 96.0%（原始照片 100%）。
+- `docs/change-request/CR-002`：向量下发端点缺失，待裁决。
 
 ## [2.0.0-doc] - 2026-11-18
 
