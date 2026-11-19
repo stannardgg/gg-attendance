@@ -31,8 +31,8 @@ class ModelConfig:
 
     model_dir: str = field(default_factory=lambda: _get(
         "MODEL_DIR",
-        # 默认指向本机的模型目录（隔壁项目已备好四个 ONNX，见 models/README.md）
-        "/Users/Admin/Documents/programe/cangqiong-attendance-main/models"))
+        # 默认用项目内 models/ 目录（四个 ONNX 不入 git，获取方式见 README）
+        os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "models")))
     det: str = "det_10g.onnx"
     rec: str = "w600k_r50.onnx"
     landmark: str = "2d106det.onnx"
