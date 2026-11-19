@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 from app.config import settings
@@ -18,6 +19,9 @@ from app.llm.client import LlmUnavailable, chat
 from app.llm.prompts import SYSTEM_PROMPT
 
 log = logging.getLogger(__name__)
+
+# 纯应答词不值得等一次模型往返（思考型模型要 1~2 秒），保持轻量固定回应
+_ACK = re.compile(r"^(谢谢|多谢|辛苦|好的|好嘞|收到|嗯+|哦+|ok|okay)[，,！!。.~～\s]*$", re.IGNORECASE)
 
 _STATUS_LABEL = {
     "PRESENT": "出勤",
@@ -33,7 +37,7 @@ def answer(state: AgentState) -> dict:
         return {}
 
     if state.get("intent") == "chitchat":
-        return {"answer": guide_text()}
+        return {"answer": _chitchat_reply(state.get("query") or "")}
 
     results = state.get("tool_results") or []
     if not results:
@@ -48,6 +52,33 @@ def answer(state: AgentState) -> dict:
         text += (f"\n\n这次操作已留痕（操作记录 #{state['last_action_log_id']}）。"
                  f"如需撤销，点消息下方的「撤销」按钮，30 分钟内有效。")
     return {"answer": f"{text}\n\n{footer}".strip()}
+
+
+def _chitchat_reply(text: str) -> str:
+    """寒暄/问用法：有模型时自然作答，没模型时回落固定引导（§11.8 降级语义不变）。
+
+    无论走不走模型，回答都要落到"能问什么"——引导文案是产品行为的一部分，
+    模型的自我介绍只是包装，不能把用户引向工具清单之外的能力。
+    """
+    text = (text or "").strip()
+    if _ACK.match(text):
+        return "好的。想查数据可以直接说，比如「张三今天签到了吗」「计算机 2 班这周出勤率」。"
+    if not settings.llm_enabled:
+        return guide_text()
+    try:
+        reply = chat([
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "system", "content":
+                "用户在寒暄、闲聊或询问你的能力。本轮没有调用任何工具：不要输出「数据来源」行，"
+                "也不要给出任何考勤数字。用两三句话自然回应；跑题的话题礼貌说明你只处理"
+                "签到、考勤、班级课程相关的事。最后附上这些标准问法，引导用户下一步：\n"
+                + guide_text()},
+            {"role": "user", "content": text},
+        ])
+        return reply.content.strip() or guide_text()
+    except LlmUnavailable as exc:
+        log.info("llm-chitchat-skipped %s", exc)
+        return guide_text()
 
 
 def _compose(results: list[dict[str, Any]]) -> str:
