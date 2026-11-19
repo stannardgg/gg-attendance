@@ -200,8 +200,7 @@ public class AppealService {
         a.setHandledBy(SecurityUtils.current().accountId());
         a.setHandledAt(LocalDateTime.now());
         appealMapper.updateById(a);
-        audit.write("APPEAL_HANDLE", "APPEAL", id,
-                (req.approved() ? "通过" : "驳回") + "：" + req.reply());
+        // 审计由 @Audited 切面统一写，这里不再重复
         return toResp(a);
     }
 
