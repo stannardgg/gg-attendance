@@ -1,0 +1,12 @@
+# gitleaks 自定义配置：默认规则之上，对 RFC 6455 示例 nonce 永久放行。
+# 说明：deploy/scripts/verify-nginx.sh 的 Sec-WebSocket-Key 值是 RFC 6455 §4.2.1
+# 文档示例（"the sample nonce" 的 base64，源码已改为运行时生成），不是密钥。
+# 不用 .gitleaksignore 的 SHA fingerprint——rebase 合并会改写哈希，一次就废。
+[extend]
+useDefault = true
+
+# 全局 allowlist：对所有规则生效（含 useDefault 引入的规则）
+[[allowlists]]
+description = "RFC 6455 WS 握手示例 nonce（非密钥）"
+paths = ['''(^|/)deploy/scripts/verify-nginx\.sh$''']
+regexes = ['''Sec-WebSocket-Key''']
