@@ -1,0 +1,119 @@
+"""挑战会话状态机（Redis）。
+
+四条硬约束（§9.4）：
+  1. 一次性：challengeId 用后即焚（finish 成功或失败都销毁），防重放；
+  2. 绑定：state 里存 sessionId/studentId/ticketJti，finish 时核对票据；
+  3. TTL：60 秒，Redis 原生过期，不自己实现时钟；
+  4. 多 worker 安全：**所有判定依据都存在 state 里，而不是进程内存**——
+     这是「4 worker 跨进程状态正确」的关键。若把帧序列放在进程内 dict，
+     worker1 收的帧 worker2 看不见，动作就数不齐。
+
+帧序列的存储取舍：
+  - 只存每帧的暗度标量（float），不存图像——单次挑战 ≤12 帧，每帧一个数，
+    Redis 里几百字节；存图像既慢又有隐私问题（§13.4 不落原图）。
+"""
+from __future__ import annotations
+
+import json
+import time
+import uuid
+from dataclasses import asdict, dataclass, field
+
+from app.config import settings
+
+PREFIX = "fa:challenge:"
+
+ACTION_WINDOW = {
+    "MOUTH_ONCE": settings.action.window_ms_once,
+    "MOUTH_TWICE": settings.action.window_ms_twice,
+}
+
+
+@dataclass
+class ChallengeState:
+    """一次挑战的全部状态。序列化后整个存进 Redis 一个 key。"""
+
+    challenge_id: str
+    session_id: int
+    student_id: int
+    ticket_jti: str
+    action: str                      # MOUTH_ONCE / MOUTH_TWICE
+    need: int                        # 需要完成的动作次数
+    window_ms: int
+    min_frames: int
+    created_ms: int
+    baseline_ratio: float            # 基线帧嘴区暗度
+    baseline_degraded: bool          # 基线不可得、退回序列首帧
+    seq: int = 0                     # 已接收帧数（也用作下一帧的 seq）
+    ratios: list[float] = field(default_factory=list)
+    closed: bool = False             # 已 finish（无论成败），防止重复提交
+    no_face_run: int = 0             # 连续无脸帧数
+    multi_face_run: int = 0          # 连续多脸帧数
+    # ROI 在 start 时锁定（192 对齐空间里的矩形），后续帧直接复用坐标。
+    # -1 表示尚未锁定（首帧才锁定）。
+    roi_x1: int = -1
+    roi_y1: int = -1
+    roi_x2: int = -1
+    roi_y2: int = -1
+    # 每帧的活体概率与首/末帧特征——三道门禁的原始数据，finish 时统一判
+    live_probs: list[float] = field(default_factory=list)
+    first_emb: list[float] = field(default_factory=list)
+    last_emb: list[float] = field(default_factory=list)
+
+
+class ChallengeStore:
+    """Redis 状态存取。所有方法都是原子的（GET→改→SET 有竞态，
+    但同一挑战的帧按 seq 串行上传，实际不会并发写同一个 key；
+    finish 用 DELETE 返回值保证只提交一次）。"""
+
+    def __init__(self, redis_client):
+        self.redis = redis_client
+
+    def _key(self, cid: str) -> str:
+        return PREFIX + cid
+
+    def create(self, session_id: int, student_id: int, ticket_jti: str,
+               action: str, baseline_ratio: float, baseline_degraded: bool) -> ChallengeState:
+        cid = f"c_{uuid.uuid4().hex[:10]}"
+        st = ChallengeState(
+            challenge_id=cid,
+            session_id=session_id,
+            student_id=student_id,
+            ticket_jti=ticket_jti,
+            action=action,
+            need=1 if action == "MOUTH_ONCE" else 2,
+            window_ms=ACTION_WINDOW.get(action, settings.action.window_ms_once),
+            min_frames=settings.action.min_frames,
+            created_ms=int(time.time() * 1000),
+            baseline_ratio=baseline_ratio,
+            baseline_degraded=baseline_degraded,
+        )
+        self.redis.set(self._key(cid), json.dumps(asdict(st)),
+                       ex=settings.challenge.ttl_sec)
+        return st
+
+    def get(self, cid: str) -> ChallengeState | None:
+        raw = self.redis.get(self._key(cid))
+        if raw is None:
+            return None
+        data = json.loads(raw)
+        return ChallengeState(**data)
+
+    def save(self, st: ChallengeState) -> None:
+        """剩余 TTL 跟随创建时间，避免刷新把过期时间顺延。"""
+        elapsed = int(time.time() * 1000) - st.created_ms
+        remain = max(1, settings.challenge.ttl_sec - elapsed // 1000)
+        self.redis.set(self._key(st.challenge_id), json.dumps(asdict(st)), ex=remain)
+
+    def consume(self, cid: str) -> ChallengeState | None:
+        """原子地取走并删除。finish 只允许成功一次，靠它实现。"""
+        pipe = self.redis.pipeline()
+        pipe.get(self._key(cid))
+        pipe.delete(self._key(cid))
+        raw, _ = pipe.execute()
+        if raw is None:
+            return None
+        return ChallengeState(**json.loads(raw))
+
+    def remaining_ms(self, st: ChallengeState) -> int:
+        return max(0, st.window_ms - (int(time.time() * 1000) - st.created_ms))

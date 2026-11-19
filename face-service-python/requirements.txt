@@ -1,0 +1,14 @@
+# 人脸服务依赖。版本尽量宽松，锁定由部署层的 lockfile 完成（B6）。
+# 注意：numpy 与 onnxruntime 的版本要兼容（本机为 numpy 2.5 + onnxruntime 1.32）。
+opencv-python-headless>=4.10
+numpy>=1.26
+onnxruntime>=1.17
+fastapi>=0.110
+uvicorn>=0.29
+pydantic>=2.6
+python-multipart>=0.0.9
+redis>=5.0
+
+# 测试
+pytest>=8.0
+fakeredis>=2.21
