@@ -77,11 +77,15 @@ class MatchConfig:
 
 @dataclass
 class GateConfig:
-    """三道硬门禁（§4.4.4）。AND 关系，逐项回传便于归因。"""
+    """三道硬门禁（§4.4.4）。AND 关系，逐项回传便于归因。
 
-    liveness_threshold: float = 0.55
-    liveness_samples: int = 5
-    identity_sim: float = 0.55
+    阈值允许环境变量覆盖：联调/端到端演练时常常需要单独放宽某道门，
+    但线上必须由 sys_config 下发（B6 接配置中心后这里的默认值只作兜底）。
+    """
+
+    liveness_threshold: float = field(default_factory=lambda: _get_float("LIVENESS_THRESHOLD", 0.55))
+    liveness_samples: int = field(default_factory=lambda: _get_int("LIVENESS_SAMPLES", 5))
+    identity_sim: float = field(default_factory=lambda: _get_float("IDENTITY_SIM", 0.55))
 
 
 @dataclass

@@ -72,10 +72,21 @@ class VectorIndex:
             ids = list(self._ids)
         v = np.asarray(emb, dtype=np.float32).ravel()
         sims = mat @ v
-        order = np.argsort(sims)[::-1]
-        top1 = int(order[0])
-        top2 = float(sims[order[1]]) if len(order) > 1 else None
-        return ids[top1], float(sims[top1]), top2
+        # ★ 必须按 studentId 聚合取最大值再比：
+        #   一个学生会有 5~10 条样本向量（face_vector 本来就是多行），
+        #   直接按行排序会让"同一个人的两条样本"占掉 top1 和 top2，
+        #   margin 恒为 0 → 所有正常签到都被判"像两个人"而失败。
+        best: dict[int, float] = {}
+        for sid, s in zip(ids, sims):
+            cur = best.get(sid)
+            if cur is None or s > cur:
+                best[sid] = float(s)
+        ranked = sorted(best.items(), key=lambda kv: kv[1], reverse=True)
+        if not ranked:
+            return None, -1.0, None
+        top1_id, top1_sim = ranked[0]
+        top2_sim = ranked[1][1] if len(ranked) > 1 else None
+        return top1_id, top1_sim, top2_sim
 
 
 _index = VectorIndex()
