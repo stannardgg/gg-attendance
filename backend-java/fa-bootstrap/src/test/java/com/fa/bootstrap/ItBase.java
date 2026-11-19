@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import org.junit.jupiter.api.BeforeEach;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.web.client.TestRestTemplate;
@@ -15,6 +16,7 @@ import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
+import org.springframework.http.client.HttpComponentsClientHttpRequestFactory;
 
 /**
  * 集成测试基类。
@@ -33,6 +35,19 @@ public abstract class ItBase {
 
     @Autowired
     protected ObjectMapper mapper;
+
+    /**
+     * 用 Apache HttpClient 替换默认的 HttpURLConnection。
+     *
+     * <p>原因：本套用例要断言「带 body 的 POST 收到 401」。JDK 的 HttpURLConnection
+     * 在流式写入请求体后遇到 401 会抛 {@code HttpRetryException: cannot retry due to
+     * server authentication, in streaming mode}——它想重发请求但没有缓冲的 body。
+     * 这是客户端行为，不是服务端返回错。
+     */
+    @BeforeEach
+    void useApacheHttpClient() {
+        rest.getRestTemplate().setRequestFactory(new HttpComponentsClientHttpRequestFactory());
+    }
 
     protected static String suffix() {
         return UUID.randomUUID().toString().substring(0, 8);
