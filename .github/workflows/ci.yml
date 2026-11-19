@@ -250,8 +250,9 @@ jobs:
               def pct(covered, missed):
                   total = covered + missed
                   return f"{100.0 * covered / total:.1f}%" if total else "n/a"
-              module = path.split(os.sep)[0]
-              print(f"{module:16s} 指令 {pct(ic, im):>6s}  分支 {pct(bc, bm):>6s}  行 {pct(lc, lm):>6s}")
+              module = ("合计（含集成测试）" if path.startswith("fa-bootstrap/target/site/jacoco-aggregate")
+                        else path.split(os.sep)[0])
+              print(f"{module:20s} 指令 {pct(ic, im):>6s}  分支 {pct(bc, bm):>6s}  行 {pct(lc, lm):>6s}")
           PY
 
   python:
