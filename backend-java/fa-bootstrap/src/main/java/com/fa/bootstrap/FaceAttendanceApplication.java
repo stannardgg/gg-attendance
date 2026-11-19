@@ -15,7 +15,7 @@ import org.springframework.scheduling.annotation.EnableScheduling;
  * 将来只要有任何一个接口（比如某个 Port/SPI）落在 com.fa 下就会启动失败。
  */
 @SpringBootApplication(scanBasePackages = "com.fa")
-@MapperScan({"com.fa.auth.infra", "com.fa.org.infra"})
+@MapperScan({"com.fa.auth.infra", "com.fa.org.infra", "com.fa.checkin.infra"})
 @EnableScheduling
 public class FaceAttendanceApplication {
 
