@@ -153,6 +153,7 @@ public class AppealService {
 
     /** 处理申诉：通过 → 同一事务把考勤改成 PRESENT（无记录则补建）。 */
     @Transactional
+    @com.fa.common.audit.Audited(action = "APPEAL_HANDLE", target = "APPEAL")
     public Resp handle(long id, HandleReq req) {
         Appeal a = appealMapper.selectById(id);
         if (a == null) {
