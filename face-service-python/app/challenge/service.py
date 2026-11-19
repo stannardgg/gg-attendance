@@ -191,7 +191,7 @@ class ChallengeService:
                     reject = name
                     break
 
-        return {
+        result = {
             "passed": passed,
             "rejectGate": reject,
             "gates": {k: v.to_dict() for k, v in all_gates.items()},
@@ -200,7 +200,39 @@ class ChallengeService:
             "detectedAction": detected,
             "frames": len(st.ratios),
             "baselineDegraded": st.baseline_degraded,
+            "attendanceStatus": None,
+            "attendanceId": None,
         }
+
+        # 门禁全过才落库。落库失败必须让学生看到，不能"假成功"。
+        if passed:
+            try:
+                from app import java_client
+                committed = java_client.commit_checkin(
+                    session_id=st.session_id,
+                    student_id=st.student_id,
+                    similarity=float(sim),
+                    liveness_median=float(np.median(st.live_probs)) if st.live_probs else None,
+                    identity_sim=float(i_g.value) if i_g.value is not None else None,
+                    action_count=int(detected),
+                    action_seq=st.action,
+                )
+                result["attendanceStatus"] = committed.get("status")
+                result["attendanceId"] = committed.get("attendanceId")
+            except java_client.JavaError as exc:
+                if exc.code == "FA-3003":
+                    # 已签到：网络重试导致的重复提交，按成功处理
+                    result["attendanceStatus"] = "ALREADY"
+                else:
+                    result["passed"] = False
+                    result["rejectGate"] = "commit"
+                    result["commitError"] = exc.message
+            except Exception as exc:                            # noqa: BLE001
+                result["passed"] = False
+                result["rejectGate"] = "commit"
+                result["commitError"] = f"提交签到结果失败：{exc}"
+
+        return result
 
     # ---------------- helpers ----------------
     def _count(self, st: ChallengeState) -> int:
