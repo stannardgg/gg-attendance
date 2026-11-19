@@ -95,6 +95,19 @@ class Landmarker:
         pts = (np.asarray(out, dtype=np.float32).reshape(-1, 2) + 1.0) * (self.size // 2)
         return pts, crop
 
+    def mouth_rect(self, pts: np.ndarray) -> tuple[int, int, int, int]:
+        """由关键点算嘴部 ROI 矩形（192 空间坐标），供挑战服务锁定后跨帧复用。"""
+        mouth = pts[MOUTH_LM_IDS]
+        x1 = int(np.floor(mouth[:, 0].min())) - 2
+        y1 = int(np.floor(mouth[:, 1].min())) - 2
+        x2 = int(np.ceil(mouth[:, 0].max())) + 2
+        y2 = int(np.ceil(mouth[:, 1].max())) + 2
+        x1, y1 = max(x1, 0), max(y1, 0)
+        x2, y2 = min(x2, self.size), min(y2, self.size)
+        if x2 - x1 < 4 or y2 - y1 < 4:
+            raise ValueError("嘴部 ROI 过小，无法测量")
+        return x1, y1, x2, y2
+
     def mouth_roi(self, img_bgr: np.ndarray, bbox) -> tuple[np.ndarray, np.ndarray]:
         """从关键点定位嘴部 ROI，返回 (roi 灰度图, 192 空间 crop)。
 
