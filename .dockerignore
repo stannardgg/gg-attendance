@@ -1,0 +1,29 @@
+# 构建上下文是仓库根（java/face/web 三份 Dockerfile 的 context 都是 ".."）。
+# 这里只放「肯定不该进镜像、且体积大」的东西：漏了会让 docker 每次 build 都打包几百 MB。
+.git
+.github
+.workbuddy
+.DS_Store
+
+# 训练/测试素材，只在本机算法实验用
+Cleaned_CASIA_FaceV5
+
+# 依赖与构建产物：镜像里会重新装、重新编
+**/node_modules
+**/dist
+**/target
+**/__pycache__
+**/.pytest_cache
+**/.venv
+
+# 模型权重由 compose 以只读卷挂载，不进镜像
+face-service-python/models
+deploy/data
+deploy/tls
+deploy/logs
+deploy/.env
+
+# 文档与流程产物
+docs
+*.md
+CHANGELOG.md

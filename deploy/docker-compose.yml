@@ -1,0 +1,310 @@
+# =====================================================================
+# 人脸签到系统 · 单机编排（§12.1 七个服务）
+# =====================================================================
+# 入口只有 nginx。java / face / agent / mysql / redis / minio 都在内部网络，
+# 不映射宿主机端口（§13.3「内部服务间走容器网络，不暴露宿主机端口」）。
+#
+#   1. cp .env.example .env  并改密钥
+#   2. ./scripts/gen-tls.sh                 # 生成自签证书（或放真实证书到 tls/）
+#   3. docker compose up -d --build
+#   4. ./scripts/healthcheck.sh
+# =====================================================================
+
+name: fa
+
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  # ---------------------------------------------------------------- MySQL
+  mysql:
+    image: ${DOCKER_REGISTRY:-docker.io}/library/mysql:8.0
+    restart: unless-stopped
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-face_attendance}
+      MYSQL_USER: ${MYSQL_USER:-fa_app}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+      MYSQL_FACE_RO_USER: ${MYSQL_FACE_RO_USER:-face_ro}
+      MYSQL_FACE_RO_PASSWORD: ${MYSQL_FACE_RO_PASSWORD}
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_0900_ai_ci
+      - --default-time-zone=+08:00
+      - --max-connections=300
+    volumes:
+      - ./data/mysql:/var/lib/mysql
+      # 仅在**空数据目录**首次启动时执行：建 face_ro（只读）账号
+      - ./mysql/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p\"$$MYSQL_ROOT_PASSWORD\" --silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 40
+      start_period: 20s
+    logging: *default-logging
+
+  # ---------------------------------------------------------------- Redis
+  redis:
+    image: ${DOCKER_REGISTRY:-docker.io}/library/redis:7-alpine
+    restart: unless-stopped
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+    command:
+      - sh
+      - -c
+      - exec redis-server --requirepass "$$REDIS_PASSWORD" --appendonly yes --save ""
+    volumes:
+      - ./data/redis:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli --no-auth-warning -a \"$$REDIS_PASSWORD\" ping | grep -q PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    logging: *default-logging
+
+  # ---------------------------------------------------------------- MinIO
+  # 当前版本只用于原图归档（§13.3 加密后存 MinIO）；业务未接线时也保持 healthy，
+  # 避免后续开启原图留存要改编排。
+  #
+  # 放在 archive profile 里：默认栈不启动它。原因是它没有被任何业务代码调用
+  # （face_vector 只存特征，不存原图），而 MinIO 镜像在国内源经常拉不下来——
+  # 让一个没人用的服务挡住「十个容器都 healthy」没有意义。
+  # 需要开原图留存时：docker compose --profile archive up -d
+  minio:
+    profiles: ["archive"]
+    image: ${DOCKER_REGISTRY:-docker.io}/minio/minio:RELEASE.2024-10-13T13-34-11Z
+    restart: unless-stopped
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-fa-minio}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+    command: server /data --console-address ":9001"
+    volumes:
+      - ./data/minio:/data
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:9000/minio/health/live"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+    logging: *default-logging
+
+  # ---------------------------------------------------------------- Java
+  java:
+    build:
+      context: ..
+      dockerfile: deploy/docker/java.Dockerfile
+      args:
+        REGISTRY: ${DOCKER_REGISTRY:-docker.io}
+    image: fa/java:1.0.0
+    restart: unless-stopped
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+      APP_ENV: ${APP_ENV:-prod}
+      DB_HOST: mysql
+      DB_PORT: "3306"
+      DB_NAME: ${MYSQL_DATABASE:-face_attendance}
+      DB_USER: ${MYSQL_USER:-fa_app}
+      DB_PASSWORD: ${MYSQL_PASSWORD}
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+      JWT_SECRET: ${JWT_SECRET}
+      JWT_ACCESS_TTL: ${JWT_ACCESS_TTL:-1800}
+      JWT_REFRESH_TTL: ${JWT_REFRESH_TTL:-604800}
+      INTERNAL_TOKEN: ${INTERNAL_TOKEN}
+      BOOTSTRAP_ADMIN_USERNAME: ${BOOTSTRAP_ADMIN_USERNAME:-admin}
+      BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD}
+      AGENT_PUBLIC_URL: ${AGENT_PUBLIC_URL:-https://localhost/agent}
+      CONFIRM_TTL_SEC: ${CONFIRM_TTL_SEC:-60}
+      UNDO_WINDOW_SEC: ${UNDO_WINDOW_SEC:-1800}
+      # 二维码密钥没有 application.yml 的 env 映射，用系统属性注入（Spring 优先级更高）
+      JAVA_OPTS: >-
+        -XX:MaxRAMPercentage=75 -XX:+UseG1GC
+        -Dapp.qr.secret=${SESSION_QR_SECRET}
+        -Dapp.mobile.public-url=${MOBILE_PUBLIC_URL:-https://localhost}
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8080/actuator/health | grep -q UP"]
+      interval: 10s
+      timeout: 5s
+      retries: 40
+      start_period: 60s
+    volumes:
+      - ./logs/java:/app/logs
+    logging: *default-logging
+
+  # ---------------------------------------------------------------- Face
+  face:
+    build:
+      context: ..
+      dockerfile: deploy/docker/face.Dockerfile
+      args:
+        REGISTRY: ${DOCKER_REGISTRY:-docker.io}
+    image: fa/face:1.0.0
+    restart: unless-stopped
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+      FACE_WORKERS: ${FACE_WORKERS:-2}
+      FA_MODEL_DIR: /app/models
+      FA_REDIS_HOST: redis
+      FA_REDIS_PORT: "6379"
+      FA_REDIS_DB: "1"
+      FA_REDIS_PASSWORD: ${REDIS_PASSWORD}
+      FA_JAVA_INTERNAL_URL: http://java:8080
+      FA_INTERNAL_TOKEN: ${INTERNAL_TOKEN}
+      FA_LIVENESS_THRESHOLD: ${LIVENESS_THRESHOLD:-0.55}
+      FA_IDENTITY_SIM: ${IDENTITY_SIM:-0.55}
+      # CR-010：允许验收脚本指定挑战动作。生产必须留 0，否则可预录指定动作。
+      FA_ALLOW_ACTION_HINT: ${ALLOW_ACTION_HINT:-0}
+      # 压测放宽挑战 TTL（默认 60 = 契约值）：单机 CPU 推理 30 路并发时 finish 排队
+      # 会超过 60s，排队超时的挑战被 Redis 删掉（R3 容量问题）。生产留默认。
+      # 注意 face 的 config._get 会自动加 FA_ 前缀，这里必须用 FA_CHALLENGE_TTL_SEC。
+      FA_CHALLENGE_TTL_SEC: ${FA_CHALLENGE_TTL_SEC:-60}
+      FA_SYNC_ENABLED: "1"
+      FA_SYNC_INTERVAL: ${VECTOR_SYNC_INTERVAL:-60}
+    depends_on:
+      redis:
+        condition: service_healthy
+      java:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8000/face-api/health | grep -q '\"status\":\"UP\"'"]
+      interval: 10s
+      timeout: 5s
+      retries: 40
+      start_period: 40s
+    volumes:
+      # 模型不入库，从宿主机只读挂载（4 个 ONNX，约 198MB）
+      - ${MODELS_DIR:-../face-service-python/models}:/app/models:ro
+    logging: *default-logging
+
+  # ---------------------------------------------------------------- Agent
+  agent:
+    build:
+      context: ../agent-service
+      dockerfile: Dockerfile
+    image: fa/agent:1.0.0
+    restart: unless-stopped
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+      JAVA_BASE_URL: http://java:8080
+      INTERNAL_TOKEN: ${INTERNAL_TOKEN}
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
+      REDIS_CHECKPOINT_URL: redis://:${REDIS_PASSWORD}@redis:6379/2
+      LLM_BASE_URL: ${LLM_BASE_URL:-}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_MODEL: ${LLM_MODEL:-}
+      LLM_TEMPERATURE: ${LLM_TEMPERATURE:-0.2}
+      AGENT_LEVEL_L3: ${AGENT_LEVEL_L3:-false}
+      CONFIRM_TTL_SEC: ${CONFIRM_TTL_SEC:-60}
+      UNDO_WINDOW_SEC: ${UNDO_WINDOW_SEC:-1800}
+    command:
+      - streamlit
+      - run
+      - app/main.py
+      - --server.port=8501
+      - --server.address=0.0.0.0
+      - --server.headless=true
+      # nginx 挂在 /agent/ 下，Streamlit 必须知道自己的前缀
+      - --server.baseUrlPath=agent
+      - --server.enableCORS=false
+      - --server.enableXsrfProtection=false
+    depends_on:
+      java:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      # 镜像里没有 curl，用 python 探活。baseUrlPath=/agent 时健康端点就在
+      # /agent/_stcore/health；不带前缀的 /_stcore/health 会 404，
+      # 而 urlopen 对 404 抛 HTTPError —— 写在一个 list 里两者串联，必然失败。
+      test:
+        - CMD-SHELL
+        - >-
+          python -c "import urllib.request as u;
+          u.urlopen('http://127.0.0.1:8501/agent/_stcore/health', timeout=3).read()"
+          || exit 1
+      interval: 15s
+      timeout: 6s
+      retries: 20
+      start_period: 30s
+    logging: *default-logging
+
+  # ---------------------------------------------------------------- Nginx
+  nginx:
+    build:
+      context: ..
+      dockerfile: deploy/docker/web.Dockerfile
+      args:
+        REGISTRY: ${DOCKER_REGISTRY:-docker.io}
+    image: fa/web:1.0.0
+    restart: unless-stopped
+    ports:
+      - "${HTTP_PORT:-80}:80"
+      - "${HTTPS_PORT:-443}:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/conf.d:/etc/nginx/conf.d:ro
+      - ./tls:/etc/nginx/tls:ro
+    depends_on:
+      java:
+        condition: service_started
+      face:
+        condition: service_started
+      agent:
+        condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS -k https://127.0.0.1/healthz >/dev/null && nginx -t 2>/dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+    logging: *default-logging
+
+  # ---------------------------------------------------------------- E2E
+  # 16.3 的 18 条验收场景。**只在需要时启动**（profile: test），
+  # 常规 `docker compose up` 不会创建它，也不占端口。
+  #
+  # 为什么复用 fa/face 镜像：套件要用 cv2 + onnxruntime + 同一份模型来造场景帧，
+  # 单独做一个测试镜像等于把 opencv/onnx 再装一遍（约 600MB），没有收益。
+  # 它必须跑在 compose 网络里：/internal/** 不对宿主机暴露，出网就测不了 Agent 工具。
+  e2e:
+    profiles: ["test"]
+    image: fa/face:1.0.0
+    working_dir: /app
+    environment:
+      TZ: ${TZ:-Asia/Shanghai}
+      E2E_BASE: https://nginx
+      E2E_JAVA: http://java:8080
+      E2E_FACE: http://face:8000
+      E2E_ADMIN_USER: ${BOOTSTRAP_ADMIN_USERNAME:-admin}
+      E2E_ADMIN_PWD: ${BOOTSTRAP_ADMIN_PASSWORD}
+      E2E_INTERNAL_TOKEN: ${INTERNAL_TOKEN}
+      # 场景 03 要在本地算「45 秒前的码」，必须拿到与服务端相同的密钥
+      E2E_QR_SECRET: ${SESSION_QR_SECRET}
+      E2E_DATASET: /dataset
+      E2E_OUT: /out
+      PYTHONPATH: /e2e:/app
+    volumes:
+      - ../tests/e2e:/e2e:ro
+      - ../Cleaned_CASIA_FaceV5:/dataset:ro
+      - ./out:/out
+      - ${MODELS_DIR:-../face-service-python/models}:/app/models:ro
+    depends_on:
+      java:
+        condition: service_healthy
+      face:
+        condition: service_healthy
+      nginx:
+        condition: service_healthy
+    logging: *default-logging
