@@ -91,7 +91,19 @@ public final class CheckinDtos {
             Long attendanceId,
             String status,
             LocalDateTime checkinAt,
-            boolean duplicate) {
+            boolean duplicate,
+            // 大屏推送要显示姓名：只给 studentId 的话前端只能推"有学生"，或者再请求一次
+            String studentName) {
+    }
+
+    /**
+     * join 请求体（契约 /mobile/sessions/{sid}/join 的 requestBody）。
+     *
+     * <p>qrToken 是「人到现场」的唯一凭证。少了它，任何知道 sessionId 的人
+     * 都能远程换票签到，二维码就退化成装饰品。
+     */
+    public record JoinReq(
+            @NotBlank @Size(min = 16, max = 16) String qrToken) {
     }
 
     public record JoinData(

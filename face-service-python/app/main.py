@@ -13,11 +13,14 @@
 """
 from __future__ import annotations
 
+import base64
 import hashlib
+import json
 import logging
 import os
 
 import cv2
+import numpy as np
 from fastapi import FastAPI, File, Form, Header, Request, UploadFile
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -35,6 +38,13 @@ logger = logging.getLogger("face-service")
 app = FastAPI(title="人脸签到 · 人脸服务", version="0.1.0")
 _store = None
 _service: ChallengeService | None = None
+# 采集样本的向量暂存（enroll/sample → Java 落库）。见 CR-009：
+# 契约 FaceEnrollReq 只传 sampleKeys，不含向量；Java 没有模型，算不出 embedding，
+# 所以由 face 把「sampleKey → 向量」写进 Redis，Java 提交时按 key 取走并落 face_vector。
+# 用 DB 0（Java 默认库）而不是挑战用的 DB 1，键前缀隔离。
+_enroll_redis = None
+ENROLL_KEY_PREFIX = "fa:enroll:sample:"
+ENROLL_TTL_SEC = int(os.getenv("FA_ENROLL_SAMPLE_TTL", "900"))
 
 
 def _trace(request: Request) -> str:
@@ -51,7 +61,7 @@ def _resp(request: Request, code: str, message: str, data=None, status=200):
 
 @app.on_event("startup")
 def _startup():
-    global _store, _service
+    global _store, _service, _enroll_redis
     try:
         engine.load_all()
     except ModelUnavailable as exc:
@@ -65,6 +75,11 @@ def _startup():
     )
     _store = ChallengeStore(client)
     _service = ChallengeService(_store)
+    _enroll_redis = redis_lib.Redis(
+        host=settings.redis.host, port=settings.redis.port, db=0,
+        password=settings.redis.password or None,
+        decode_responses=True,
+    )
     idx_path = os.getenv("FA_FACE_INDEX_FILE")
     if idx_path:
         n = index().load_json(idx_path)
@@ -141,6 +156,8 @@ def health(request: Request):
 class ChallengeStartReq(BaseModel):
     baselineFrame: str
     deviceHash: str | None = None
+    # CR-010：仅当 FA_ALLOW_ACTION_HINT=1 时生效，验收环境用来稳定复现负例
+    action: str | None = None
 
 
 @app.post("/face-api/challenge/start")
@@ -148,7 +165,7 @@ def challenge_start(request: Request, body: ChallengeStartReq,
                     authorization: str = Header(default="")):
     token = authorization.removeprefix("Bearer ").strip()
     img = engine.decode_b64_jpeg(body.baselineFrame)
-    return _resp(request, "FA-0000", "ok", _service.start(token, img))
+    return _resp(request, "FA-0000", "ok", _service.start(token, img, body.action))
 
 
 @app.post("/face-api/challenge/{cid}/frame")
@@ -230,6 +247,16 @@ async def enroll_sample(request: Request, frame: UploadFile = File(...),
     advice = None
     if not reasons:
         sample_key = hashlib.sha256(raw).hexdigest()[:16]
+        # 向量暂存，供 Java 提交时落库（CR-009）。质量分口径与响应里的 qualityScore 一致。
+        if _enroll_redis is not None:
+            payload = json.dumps({
+                "embedding": base64.b64encode(np.asarray(emb, dtype="<f4").tobytes()).decode(),
+                "dim": int(np.asarray(emb).size),
+                "model": os.getenv("FA_MODEL_NAME", "buffalo_l"),
+                "qualityScore": round(min(1.0, lap / 400.0), 3),
+                "brightness": quality.get("brightness"),
+            })
+            _enroll_redis.setex(ENROLL_KEY_PREFIX + sample_key, ENROLL_TTL_SEC, payload)
     else:
         advice = {
             "BLURRY": "请拿稳手机，别晃动",

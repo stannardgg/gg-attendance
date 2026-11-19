@@ -6,6 +6,8 @@
 """
 from __future__ import annotations
 
+import threading
+
 import cv2
 import numpy as np
 
@@ -14,6 +16,10 @@ from app.engine.detector import Detector, Face
 from app.engine.landmark import Embedder, Landmarker
 from app.engine.liveness_model import LivenessModel
 from app.engine.models import ModelRegistry, ModelUnavailable
+
+# 懒加载锁：服务端 startup 只调一次看不出问题，但压测/工具类的多线程
+# 首次并发调用会在「都看到 _registry is None」后互相覆盖，部分线程拿到 None。
+_load_lock = threading.Lock()
 
 _registry: ModelRegistry | None = None
 _detector: Detector | None = None
@@ -29,16 +35,19 @@ def load_all() -> dict[str, bool]:
     """
     global _registry, _detector, _embedder, _landmarker, _liveness
     if _registry is None:
-        _registry = ModelRegistry(settings.models)
-        _registry.load_required()
-        _detector = Detector(_registry, settings.models.det_size,
-                             settings.models.det_thresh, settings.models.nms_thresh)
-        _embedder = Embedder(_registry)
-        _landmarker = Landmarker(_registry, settings.models.landmark_size,
-                                 settings.models.landmark_margin)
-        _liveness = LivenessModel(_registry, settings.models.liveness_live_index,
-                                  settings.models.liveness_input_scale,
-                                  settings.models.liveness_crop_scale)
+        with _load_lock:
+            if _registry is None:          # 双检：等锁期间别人可能已加载完
+                registry = ModelRegistry(settings.models)
+                registry.load_required()   # 加载完才赋全局变量，读方永远看到完整对象
+                _detector = Detector(registry, settings.models.det_size,
+                                     settings.models.det_thresh, settings.models.nms_thresh)
+                _embedder = Embedder(registry)
+                _landmarker = Landmarker(registry, settings.models.landmark_size,
+                                         settings.models.landmark_margin)
+                _liveness = LivenessModel(registry, settings.models.liveness_live_index,
+                                          settings.models.liveness_input_scale,
+                                          settings.models.liveness_crop_scale)
+                _registry = registry
     return _registry.load_optional()
 
 

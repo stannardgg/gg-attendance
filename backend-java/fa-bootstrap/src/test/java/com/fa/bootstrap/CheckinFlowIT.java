@@ -85,15 +85,25 @@ class CheckinFlowIT extends ItBase {
         JsonNode qr = get("/api/v1/admin/sessions/" + sid + "/qrcode", teacher).getBody().path("data");
         assertThat(qr.path("token").asText()).hasSize(16);
         int epoch = qr.path("qrEpoch").asInt();
+        // 换码后旧 token 立刻失效（qrEpoch 进了签名），必须重新取一次
         JsonNode rotated = post("/api/v1/admin/sessions/" + sid + "/rotate-qr", null, teacher)
                 .getBody().path("data");
         assertThat(rotated.path("qrEpoch").asInt()).isEqualTo(epoch + 1);
+        String freshQr = get("/api/v1/admin/sessions/" + sid + "/qrcode", teacher)
+                .getBody().path("data").path("token").asText();
 
         // 学生 join
         post("/api/v1/auth/student/activate", Map.of("studentNo", "FS" + s + "1", "name", "学生1",
                 "classCode", "FC" + s, "password", "Student12345"), null);
         String stu = login("FS" + s + "1", "Student12345");
-        ResponseEntity<JsonNode> join = post("/api/v1/mobile/sessions/" + sid + "/join", null, stu);
+        // 旧码必须被拒（16.3 场景 3 的接口级版本）
+        ResponseEntity<JsonNode> staleQr = post("/api/v1/mobile/sessions/" + sid + "/join",
+                Map.of("qrToken", qr.path("token").asText()), stu);
+        assertThat(staleQr.getStatusCode().value()).isEqualTo(400);
+        assertThat(code(staleQr)).isEqualTo("FA-3002");
+
+        ResponseEntity<JsonNode> join = post("/api/v1/mobile/sessions/" + sid + "/join",
+                Map.of("qrToken", freshQr), stu);
         assertThat(join.getStatusCode().value()).isEqualTo(200);
         assertThat(join.getBody().path("data").path("checkinTicket").asText()).isNotBlank();
 
@@ -134,7 +144,8 @@ class CheckinFlowIT extends ItBase {
         assertThat(closed.path("absentCount").asInt()).as("未签到的应到学生补 ABSENT").isEqualTo(1);
 
         // 结束后不能再 join
-        ResponseEntity<JsonNode> afterClose = post("/api/v1/mobile/sessions/" + sid + "/join", null, stu);
+        ResponseEntity<JsonNode> afterClose = post("/api/v1/mobile/sessions/" + sid + "/join",
+                Map.of("qrToken", freshQr), stu);
         assertThat(afterClose.getStatusCode().value()).isEqualTo(409);
         assertThat(code(afterClose)).isEqualTo("FA-3001");
     }
