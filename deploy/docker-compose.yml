@@ -121,6 +121,8 @@ services:
       BOOTSTRAP_ADMIN_USERNAME: ${BOOTSTRAP_ADMIN_USERNAME:-admin}
       BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD}
       AGENT_PUBLIC_URL: ${AGENT_PUBLIC_URL:-https://localhost/agent}
+      # 人脸向量字段级加密密钥（CR-012）；留空 = 明文落库，生产必须配置
+      FA_VECTOR_AES_KEY: ${FA_VECTOR_AES_KEY:-}
       CONFIRM_TTL_SEC: ${CONFIRM_TTL_SEC:-60}
       UNDO_WINDOW_SEC: ${UNDO_WINDOW_SEC:-1800}
       # 二维码密钥没有 application.yml 的 env 映射，用系统属性注入（Spring 优先级更高）

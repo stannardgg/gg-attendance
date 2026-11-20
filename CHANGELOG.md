@@ -5,6 +5,22 @@
 
 批次完成标记（`batch-N-done`）与版本 tag 是两套，不写入本文件；本文件只记**可交付版本**。
 
+## [Unreleased]
+
+### Security
+- **人脸向量字段级加密**（CR-012）：`face_vector.embedding` 以 AES-256-GCM 落库
+  （密文 = 版本 1B + IV 12B + 密文 + tag 16B）。密钥 `FA_VECTOR_AES_KEY` 经
+  `deploy/.env` 注入 java 容器（32 字节 base64，未配置 = 明文落库并 WARN，仅限
+  本地/CI）；存量明文行兼容读取，无需停机迁移。`InternalVectorController` 成为
+  解密边界，Python 快照协议不变。新增 `VectorCrypto` 组件与 9 个纯逻辑单测。
+- **备份加密**（CR-012）：`backup.sh` 在 `BACKUP_AES_KEY` 配置后对 dump 整体加密
+  （AES-256-CBC + PBKDF2 600k 轮，明文不落盘）；`restore.sh` 支持 `.enc` 备份，
+  口令错在 openssl 阶段直接退出不污染目标库。
+
+### Changed
+- §13.3 口径更新：人脸原图不落盘（face 服务内存处理后即丢弃），MinIO 仅在启用
+  "人工复核看原图"需求时按对象加密 + 90 天清理落地（原稿与实现不符，CR-012 记录）。
+
 ## [1.0.2] - 2026-11-19
 
 ### Changed
