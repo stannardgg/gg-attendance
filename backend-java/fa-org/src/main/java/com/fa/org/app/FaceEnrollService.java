@@ -13,6 +13,7 @@ import com.fa.org.domain.Student;
 import com.fa.org.infra.FaceProfileMapper;
 import com.fa.org.infra.FaceVectorMapper;
 import com.fa.org.infra.StudentMapper;
+import com.fa.org.infra.VectorCrypto;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.time.LocalDateTime;
@@ -68,10 +69,12 @@ public class FaceEnrollService {
     private final JdbcTemplate jdbc;
     private final AuditWriter audit;
     private final ObjectMapper json;
+    private final VectorCrypto vectorCrypto;
 
     public FaceEnrollService(FaceProfileMapper profileMapper, FaceVectorMapper vectorMapper,
                              StudentMapper studentMapper, StringRedisTemplate redis,
-                             JdbcTemplate jdbc, AuditWriter audit, ObjectMapper json) {
+                             JdbcTemplate jdbc, AuditWriter audit, ObjectMapper json,
+                             VectorCrypto vectorCrypto) {
         this.profileMapper = profileMapper;
         this.vectorMapper = vectorMapper;
         this.studentMapper = studentMapper;
@@ -79,6 +82,7 @@ public class FaceEnrollService {
         this.jdbc = jdbc;
         this.audit = audit;
         this.json = json;
+        this.vectorCrypto = vectorCrypto;
     }
 
     /** 本人档案状态；从未采集返回 NONE（不建行，读接口不该有写副作用）。 */
@@ -121,6 +125,8 @@ public class FaceEnrollService {
         for (FaceVector v : vectors) {
             v.setStudentId(studentId);
             v.setCreatedAt(now);
+            // CR-012：落库前字段级加密（未配置密钥时为明文，VectorCrypto 启动时已 WARN）
+            v.setEmbedding(vectorCrypto.encrypt(v.getEmbedding()));
             vectorMapper.insert(v);
         }
 

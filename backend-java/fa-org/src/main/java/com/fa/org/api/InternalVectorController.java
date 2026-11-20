@@ -1,5 +1,6 @@
 package com.fa.org.api;
 
+import com.fa.org.infra.VectorCrypto;
 import java.sql.Blob;
 import java.util.ArrayList;
 import java.util.Base64;
@@ -20,14 +21,19 @@ import org.springframework.web.bind.annotation.RestController;
  *
  * <p>返回的是**全量快照**而不是增量游标：删除传播靠下一次替换天然覆盖，
  * 快照对 Python 侧的状态漂移还有自愈作用。1000 名学生约 1MB / 60 秒，可接受。
+ *
+ * <p>embedding 在库里是 AES-256-GCM 密文（CR-012），本类是<b>解密边界</b>：
+ * 出库即还原明文，Python 侧协议不变；密文不出 MySQL 边界。
  */
 @RestController
 public class InternalVectorController {
 
     private final JdbcTemplate jdbc;
+    private final VectorCrypto vectorCrypto;
 
-    public InternalVectorController(JdbcTemplate jdbc) {
+    public InternalVectorController(JdbcTemplate jdbc, VectorCrypto vectorCrypto) {
         this.jdbc = jdbc;
+        this.vectorCrypto = vectorCrypto;
     }
 
     @GetMapping("/internal/face/vectors")
@@ -49,11 +55,14 @@ public class InternalVectorController {
                     List<Map<String, Object>> list = new ArrayList<>();
                     while (rs.next()) {
                         Blob blob = rs.getBlob("embedding");
-                        byte[] bytes = blob.getBytes(1, (int) blob.length());
+                        int dim = rs.getInt("dim");
+                        byte[] stored = blob.getBytes(1, (int) blob.length());
+                        // CR-012 解密边界：密文行还原明文，存量明文行原样通过（VectorCrypto 兼容逻辑）
+                        byte[] bytes = vectorCrypto.decrypt(stored, dim * Float.BYTES);
                         list.add(Map.of(
                                 "studentId", rs.getLong("student_id"),
                                 "vector", Base64.getEncoder().encodeToString(bytes),
-                                "dim", rs.getInt("dim"),
+                                "dim", dim,
                                 "qualityScore", rs.getDouble("quality_score")));
                     }
                     return list;

@@ -2,10 +2,12 @@
 # =====================================================================
 # 备份恢复演练（Gate：备份必须实际可恢复）
 # =====================================================================
-# 用法：./scripts/restore.sh backups/face_attendance-YYYYmmdd-HHMMSS.sql.gz
+# 用法：./scripts/restore.sh backups/face_attendance-YYYYmmdd-HHMMSS.sql.gz[.enc]
 #
 # 设计：恢复到**独立库** fa_restore_<时间戳>，不覆盖生产库；
 # 逐个关键表比对行数，全部一致才算恢复成功。演练结束后打印导入耗时。
+# 加密备份（CR-012，.enc 后缀）需要 .env 里的 BACKUP_AES_KEY，口令错会在
+# openssl 阶段直接报 bad decrypt 退出，不会污染目标库。
 # =====================================================================
 set -euo pipefail
 
@@ -25,13 +27,27 @@ sql_root() {
   docker compose exec -T mysql sh -c "exec mysql -uroot -p\"\$MYSQL_ROOT_PASSWORD\" $*"
 }
 
+# 按后缀选择解压管道：.enc 先解密（BACKUP_AES_KEY 走 .env 的 set -a 导出）
+case "$FILE" in
+  *.enc)
+    if [ -z "${BACKUP_AES_KEY:-}" ]; then
+      echo "[restore] 失败：加密备份需要 .env 里的 BACKUP_AES_KEY" >&2
+      exit 1
+    fi
+    DECRYPT_CMD=(openssl enc -d -aes-256-cbc -pbkdf2 -iter 600000 -in "$FILE" -pass env:BACKUP_AES_KEY)
+    ;;
+  *)
+    DECRYPT_CMD=(cat "$FILE")
+    ;;
+esac
+
 echo "[restore] 源：$FILE"
 echo "[restore] 目标库：${DST_DB}（不覆盖 ${SRC_DB}）"
 
 sql_root "-e \"DROP DATABASE IF EXISTS $DST_DB; CREATE DATABASE $DST_DB DEFAULT CHARSET utf8mb4;\""
 
 start=$(date +%s)
-gunzip -c "$FILE" | docker compose exec -T mysql sh -c \
+"${DECRYPT_CMD[@]}" | gunzip -c | docker compose exec -T mysql sh -c \
   "exec mysql -uroot -p\"\$MYSQL_ROOT_PASSWORD\" $DST_DB"
 end=$(date +%s)
 echo "[restore] 导入完成，耗时 $((end - start))s"
