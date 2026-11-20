@@ -40,7 +40,9 @@ START → intake → route ─┬→ answer                    （闲聊）
 
 ```bash
 cd agent-service
-streamlit run app/main.py --server.port 8501
+# 必须 python -m：streamlit 控制台入口不把 CWD 放进 sys.path，
+# 顶层包 app 会导入失败（ModuleNotFoundError: No module named 'app'）
+python -m streamlit run app/main.py --server.port 8501
 ```
 
 未配置 `LLM_API_KEY` 时必须**优雅降级**（提示而非崩溃），快捷问句仍可用。

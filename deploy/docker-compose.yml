@@ -208,7 +208,12 @@ services:
       AGENT_LEVEL_L3: ${AGENT_LEVEL_L3:-false}
       CONFIRM_TTL_SEC: ${CONFIRM_TTL_SEC:-60}
       UNDO_WINDOW_SEC: ${UNDO_WINDOW_SEC:-1800}
+    # 必须用 python -m streamlit：streamlit 控制台入口只会把脚本所在目录
+    # (/app/app) 插入 sys.path，不含 WORKDIR(/app)，顶层包 app 将无法导入
+    # （ModuleNotFoundError）。python -m 会把 CWD 保证性插入 sys.path[0]。
     command:
+      - python
+      - -m
       - streamlit
       - run
       - app/main.py
