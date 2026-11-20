@@ -55,6 +55,43 @@ pip install pre-commit && pre-commit install
 - 密钥：只提交 `.env.example`，真实值永不入库。
 - 数据：`Cleaned_CASIA_FaceV5/`（评测集）、`models/*.onnx`、`data/` 均已在 `.gitignore` 中排除。
 
+## 启动与停止
+
+全部服务配置了 `restart: unless-stopped`。启动成功标志：healthcheck 输出六服务 healthy + 6 个对外端点 `[OK]`。
+
+| 入口       | 地址                       |
+| ---------- | -------------------------- |
+| 后台管理端 | `https://localhost/admin/` |
+| 前台移动端 | `https://localhost/m/`     |
+| Agent      | `https://localhost/agent/` |
+
+### 启动项目（环境在 Docker 中，必须先 build）
+
+B6 验收的教训之一：**源码改动不 build 不会进容器**（排查时曾被“配置已改但行为没变”误导）。
+
+```bash
+cd deploy   # 在 deploy 目录下运行
+docker compose --env-file .env build              # 全部重建，或指定：build java face agent web
+docker compose --env-file .env up -d
+./scripts/healthcheck.sh
+```
+
+### 停止项目
+
+```bash
+docker compose --env-file .env stop    # 只停容器，下次 up -d 秒回
+docker compose --env-file .env down    # 删容器，但数据卷保留，重建后数据还在
+```
+
+⚠️ **切勿使用 `down -v` 或运行 `verify-coldstart.sh` 除非刻意清库**——这两个操作会删除数据卷，数据库内容全部清空重来（`verify-coldstart.sh` 是验收冷启动用的，自带 down -v）。
+
+### 补充说明
+
+- 演示账号：教师张三工号 `191825611`、学生学号 `211`；密码不在仓库公开，见线下交付材料（管理员账号仅线下提供）。
+- **调试门 `fa-mysql-gate`**（宿主机 13306）是独立容器、不在 compose 栈里；若它停了，用 `docker start fa-mysql-gate` 单独拉起（仅开发调试用，不影响业务栈）。
+- **minio / e2e** 属于 profile 服务（archive/test），默认不启动，无需理会。
+- 首次在新机器部署时，`up -d` 会自动完成 Flyway 迁移和初始管理员创建，无需手动初始化。
+
 ## 许可
 
 内部项目，未授权请勿外传。
