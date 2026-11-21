@@ -24,6 +24,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from app.challenge.service import ChallengeService
 from app.challenge.store import ChallengeStore
 from app.common import tickets
+from app.config import settings
 from app.engine import load_all
 from app.main import app
 
@@ -86,7 +87,10 @@ def test_start_and_frame_and_finish(client, face_img):
                     headers={"Authorization": f"Bearer {ticket}"})
     assert r.status_code == 200, r.text
     data = r.json()["data"]
-    assert data["action"] == "MOUTH_ONCE"
+    # 动作是随机的（§4.4.3 防预录），不能断言具体值——只断言它来自白名单，
+    # 且给出了对应指令。早先这里写死 MOUTH_ONCE，白名单一扩容就假失败。
+    assert data["action"] in settings.action.action_whitelist
+    assert data["instruction"]
     assert data["challengeId"]
 
     cid = data["challengeId"]

@@ -129,16 +129,6 @@ export interface SessionRow {
   createdAt: string
 }
 
-export interface QrData {
-  sessionId: number
-  token: string
-  qrUrl: string
-  expiresAt: string
-  qrEpoch: number
-  className?: string
-  courseName?: string
-}
-
 export interface AttendanceRow {
   /** 按场次查询时以应到名单为基表，未签到的人还没有考勤记录，id 为 null */
   id: number | null

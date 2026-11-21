@@ -294,6 +294,13 @@ components:
             Base64 JPEG，**指令出现之前**采集的中性帧。
             缺失或其中检不到人脸时服务端降级，不拒绝请求。
         deviceHash: { type: string, maxLength: 64 }
+        action:
+          type: string
+          enum: [MOUTH_ONCE, MOUTH_TWICE, MOVE_CLOSER, MOVE_AWAY]
+          description: |
+            指定动作，**仅当服务端开启 `FA_ALLOW_ACTION_HINT=1` 时生效**（CR-010）。
+            正式环境忽略该字段——动作由服务端随机抽取，可自选等于把防预录的靶子交回给攻击者。
+            契约外的动作码返回 FA-2001。
 
     ChallengeStartData:
       type: object
@@ -302,8 +309,8 @@ components:
         challengeId: { type: string, example: c_8f2a1b }
         action:
           type: string
-          enum: [MOUTH_ONCE, MOUTH_TWICE]
-          description: ★ 只有这两个，白名单见 contracts/enums/actions.json
+          enum: [MOUTH_ONCE, MOUTH_TWICE, MOVE_CLOSER, MOVE_AWAY]
+          description: 白名单见 contracts/enums/actions.json；嘴部动作看 ROI 亮度，尺度动作看检测框尺寸
         instruction: { type: string, example: 请连着张两次嘴，每次约半秒 }
         windowMs: { type: integer, example: 3000 }
         minFrames: { type: integer, example: 8 }

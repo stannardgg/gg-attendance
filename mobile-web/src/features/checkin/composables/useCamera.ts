@@ -199,6 +199,8 @@ export function useCamera() {
     return { canvas: scratch, mean, variance: sumSq / n - mean * mean }
   }
 
+  /** 注意：返回的是完整 data URL（带 "data:image/jpeg;base64," 前缀）。
+   *  要交给 face-api 时先用 shared/utils 的 stripDataUrl 剥前缀，契约收的是纯 base64。 */
   function toDataUrl(f: SmallFrame): string {
     return f.canvas.toDataURL('image/jpeg', CAPTURE.quality)
   }

@@ -25,7 +25,6 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
-import org.springframework.beans.factory.annotation.Value;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -47,27 +46,19 @@ public class SessionService {
     private final JdbcTemplate jdbc;
     private final NameLookup nameLookup;
     private final AuditWriter audit;
-    private final QrTokenService qr;
     private final ClassService classService;
     private final CourseService courseService;
-    /** 扫码链接的站点根地址。移动端挂在 nginx 的 /m/ 下，二维码指向 /checkin 短链由 nginx 跳转。 */
-    private final String mobilePublicUrl;
 
     public SessionService(SessionMapper sessionMapper, AttendanceMapper attendanceMapper,
                           JdbcTemplate jdbc, NameLookup nameLookup, AuditWriter audit,
-                          QrTokenService qr, ClassService classService, CourseService courseService,
-                          @Value("${app.mobile.public-url:https://mobile.local}") String mobilePublicUrl) {
+                          ClassService classService, CourseService courseService) {
         this.sessionMapper = sessionMapper;
         this.attendanceMapper = attendanceMapper;
         this.jdbc = jdbc;
         this.nameLookup = nameLookup;
         this.audit = audit;
-        this.qr = qr;
         this.classService = classService;
         this.courseService = courseService;
-        this.mobilePublicUrl = mobilePublicUrl.endsWith("/")
-                ? mobilePublicUrl.substring(0, mobilePublicUrl.length() - 1)
-                : mobilePublicUrl;
     }
 
     @DataScope
@@ -95,7 +86,8 @@ public class SessionService {
         s.setStartAt(now);
         s.setEndAt(now.plusMinutes(req.durationMinutes()));
         s.setLateAfterSec(req.lateAfterSec() == null ? 300 : req.lateAfterSec());
-        s.setQrEpoch(0);
+        // qr_epoch 列保留（V1 DDL 已冻结，历史数据仍需可读），业务不再读写；
+        // 新增行由 DDL 默认值 0 兜底。
         s.setAllowAppeal(req.allowAppeal() == null || req.allowAppeal());
         sessionMapper.insert(s);
 
@@ -180,33 +172,6 @@ public class SessionService {
         sessionMapper.updateById(s);
         audit.write("SESSION_CLOSE", "SESSION", id, "结束签到，补缺勤 " + absent);
         return toResp(s);
-    }
-
-    /** 强制换码：epoch+1，旧 token 立即失效（无需黑名单）。 */
-    @Transactional
-    public CheckinDtos.QrData rotateQr(long id) {
-        CheckinSession s = require(id);
-        if (!"ACTIVE".equals(s.getStatus())) {
-            throw new BizException(ErrorCode.SESSION_CLOSED, "会话已结束，不能换码");
-        }
-        s.setQrEpoch(s.getQrEpoch() + 1);
-        sessionMapper.updateById(s);
-        audit.write("SESSION_ROTATE_QR", "SESSION", id, "换码 epoch=" + s.getQrEpoch());
-        return qrData(s);
-    }
-
-    public CheckinDtos.QrData qrCode(long id) {
-        return qrData(require(id));
-    }
-
-    private CheckinDtos.QrData qrData(CheckinSession s) {
-        var names = nameLookup.classNames(List.of(s.getClassId()));
-        var courseNames = nameLookup.courseNames(List.of(s.getCourseId()));
-        String token = qr.currentToken(s.getId(), s.getQrEpoch());
-        String url = mobilePublicUrl + "/checkin?sid=" + s.getId() + "&tk=" + token;
-        return new CheckinDtos.QrData(s.getId(), token, url,
-                LocalDateTime.ofInstant(qr.currentExpiresAt(), java.time.ZoneId.systemDefault()),
-                s.getQrEpoch(), names.get(s.getClassId()), courseNames.get(s.getCourseId()));
     }
 
     private CheckinDtos.Session toResp(CheckinSession s) {

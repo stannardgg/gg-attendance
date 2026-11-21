@@ -41,6 +41,8 @@ export interface ActiveSession {
   endAt: string
   remainingSec: number
   myStatus: 'NOT_STARTED' | 'IN_PROGRESS' | 'PRESENT' | 'LATE'
+  /** 本人对该场次最新一条申诉的状态；未申诉为 null/缺失 */
+  appealStatus?: 'PENDING' | 'APPROVED' | 'REJECTED' | 'WITHDRAWN' | null
 }
 
 export interface JoinData {
@@ -55,10 +57,14 @@ export interface JoinData {
 }
 
 export interface MobileAttendance {
+  /** attendance 主键；还没签成功时为 0 */
+  id?: number
   sessionId: number
+  sessionTitle?: string
   className?: string
   courseName?: string
-  status: AttendanceStatus
+  /** 会话进行中、本人尚未签到成功时为 null（此时仍可申诉） */
+  status: AttendanceStatus | null
   checkinAt?: string | null
   canAppeal: boolean
   appealId?: number | null
@@ -99,9 +105,11 @@ export interface Appeal {
 
 export type Gate = 'liveness' | 'identity' | 'action_count' | 'multi_face' | 'no_face' | 'match'
 
+export type FaceAction = 'MOUTH_ONCE' | 'MOUTH_TWICE' | 'MOVE_CLOSER' | 'MOVE_AWAY'
+
 export interface ChallengeStartData {
   challengeId: string
-  action: 'MOUTH_ONCE' | 'MOUTH_TWICE'
+  action: FaceAction
   instruction: string
   windowMs: number
   minFrames: number

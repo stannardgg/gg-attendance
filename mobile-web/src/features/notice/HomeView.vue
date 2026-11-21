@@ -31,10 +31,8 @@ let ticker: number | undefined
 async function load() {
   loading.value = true
   try {
-    // 契约写的是「最多一条，没有则 data=null」（java-api.yaml sessions/active），
-    // 不是数组。当成数组直接 .map() 会在没有签到任务时白屏。
-    const current = await api.get<ActiveSession | null>('/api/v1/mobile/sessions/active')
-    sessions.value = current ? [current] : []
+    // 契约 sessions/active 返回列表（可为空数组），不是单条也不是 null
+    sessions.value = await api.get<ActiveSession[]>('/api/v1/mobile/sessions/active')
     await refreshFaceStatus()
   } catch (err) {
     showToast(messageOf(err))
@@ -44,12 +42,31 @@ async function load() {
 }
 
 function go(s: ActiveSession) {
+  // 已提交待处理申诉 → 本场不可再参与（后端 join 亦以 FA-5001 拒绝）
+  if (s.appealStatus === 'PENDING') {
+    showToast('你已提交本次申诉')
+    return
+  }
   if (s.myStatus === 'PRESENT' || s.myStatus === 'LATE') {
     showToast('这场你已经签过了')
     return
   }
-  // 首页进入也需要 qrToken，所以只能引导去扫码；这里给出明确指引而不是死链
-  showToast('请扫老师大屏上的二维码进入')
+  // 取消二维码后不再要求扫码：直接带 sid 进入签到入口，由入口页换票据
+  router.push({ path: '/checkin', query: { sid: String(s.sessionId) } })
+}
+
+/** 申诉中优先于签到状态：有在办申诉时不能还写「待签到」 */
+function tagText(s: ActiveSession) {
+  if (s.appealStatus === 'PENDING') return '申诉中'
+  if (s.myStatus === 'PRESENT') return '已签到'
+  if (s.myStatus === 'LATE') return '迟到'
+  if (s.myStatus === 'IN_PROGRESS') return '进行中'
+  return '待签到'
+}
+
+function tagType(s: ActiveSession): 'primary' | 'success' | 'warning' {
+  if (s.appealStatus === 'PENDING') return 'warning'
+  return s.myStatus === 'PRESENT' || s.myStatus === 'LATE' ? 'success' : 'primary'
 }
 
 onMounted(() => {
@@ -103,19 +120,8 @@ onBeforeUnmount(() => {
         <template #value>
           <div class="right">
             <span class="clock">{{ mmss(s.remainingSec) }}</span>
-            <van-tag
-              :type="s.myStatus === 'PRESENT' || s.myStatus === 'LATE' ? 'success' : 'primary'"
-              plain
-            >
-              {{
-                s.myStatus === 'PRESENT'
-                  ? '已签到'
-                  : s.myStatus === 'LATE'
-                    ? '迟到'
-                    : s.myStatus === 'IN_PROGRESS'
-                      ? '进行中'
-                      : '待签到'
-              }}
+            <van-tag :type="tagType(s)" plain>
+              {{ tagText(s) }}
             </van-tag>
           </div>
         </template>
@@ -123,9 +129,7 @@ onBeforeUnmount(() => {
     </van-cell-group>
 
     <div class="bottom">
-      <van-button icon="scan" type="primary" round block @click="router.push('/checkin')">
-        扫二维码签到
-      </van-button>
+      <p class="hint">老师发起签到后，这场课会自动出现在上方，点进去刷脸即可。</p>
       <div class="links">
         <van-button size="small" plain @click="router.push('/me')">我的</van-button>
         <van-button size="small" plain @click="router.push('/face/enroll')">人脸采集</van-button>
@@ -152,6 +156,13 @@ onBeforeUnmount(() => {
 }
 .bottom {
   margin-top: 20px;
+}
+.hint {
+  margin: 0 16px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: #969799;
+  text-align: center;
 }
 .links {
   margin-top: 10px;

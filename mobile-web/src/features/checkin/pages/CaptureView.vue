@@ -20,7 +20,8 @@ import ActionPrompt from '../components/ActionPrompt.vue'
 import FaceGuideOverlay from '../components/FaceGuideOverlay.vue'
 import ResultPanel from '../components/ResultPanel.vue'
 import { checkin, clearJoin, restoreJoin } from '../store'
-import { deviceHash, isSecureContextOk } from '@/shared/utils'
+import { deviceHash, isSecureContextOk, isWeChat } from '@/shared/utils'
+import WeChatGuard from '@/shared/components/WeChatGuard.vue'
 
 const router = useRouter()
 const cam = useCamera()
@@ -190,8 +191,16 @@ async function retry() {
 }
 
 function goAppeal() {
+  // ★ 顺序不能反：clearJoin() 会把 checkin.sid 置为 null，先清再读就会跳到
+  // /appeal/null → 详情接口拿 NaN 路径参数 → 学生只看到「记录加载失败」（线上复现过）。
+  const sid = checkin.sid
   clearJoin()
-  router.replace(`/appeal/${checkin.sid}`)
+  if (!sid) {
+    showToast('签到信息已过期，请重新进入')
+    router.replace('/checkin')
+    return
+  }
+  router.replace(`/appeal/${sid}`)
 }
 
 async function restartAfterMultiFace() {
@@ -236,8 +245,11 @@ function onVisibility() {
 }
 
 onMounted(async () => {
+  // 微信 WebView 没有 getUserMedia，开了也白开。软引导（App.vue）可能已被学生
+  // 关掉，这里是硬拦：不进任何摄像头流程，只给复制链接。
+  if (isWeChat()) return
   if (!restoreJoin()) {
-    showToast('签到信息已过期，请重新扫码')
+    showToast('签到信息已过期，请重新进入')
     router.replace('/checkin')
     return
   }
@@ -268,7 +280,11 @@ onBeforeUnmount(() => {
         <span class="dot">·</span>
         <span class="crs">{{ checkin.courseName }}</span>
       </div>
-      <van-icon name="cross" size="20" color="#fff" @click="router.replace('/')" />
+      <div class="head-actions">
+        <!-- 常驻申诉入口：摄像头打不开/一直探测不过的学生，不能只有「关闭」这一条路 -->
+        <span class="appeal-link" @click="goAppeal">申诉</span>
+        <van-icon name="cross" size="20" color="#fff" @click="router.replace('/')" />
+      </div>
     </div>
 
     <div class="stage">
@@ -293,6 +309,8 @@ onBeforeUnmount(() => {
       <div v-if="needTap && phase !== 'result'" class="tap-layer">
         <van-button round type="primary" @click="startCamera">点击开启摄像头</van-button>
         <p class="tip">{{ probeText }}</p>
+        <!-- 摄像头打不开是「签不了」的常见原因，这里必须直接给申诉，而不是让学生自己找入口 -->
+        <van-button size="small" plain @click="goAppeal">摄像头用不了？提交申诉</van-button>
       </div>
 
       <div v-if="pausedByHidden" class="tap-layer">
@@ -350,6 +368,9 @@ onBeforeUnmount(() => {
       title="选择摄像头"
       @select="(_a: unknown, i: number) => pickDevice(i)"
     />
+
+    <!-- 微信内硬拦：摄像头必挂，不给继续选项 -->
+    <WeChatGuard v-if="isWeChat()" hard />
   </div>
 </template>
 
@@ -373,8 +394,20 @@ onBeforeUnmount(() => {
   display: flex;
   align-items: baseline;
   gap: 6px;
-  max-width: 82%;
+  flex: 1 1 auto;
+  min-width: 0;
   overflow: hidden;
+}
+.head-actions {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex: 0 0 auto;
+}
+.appeal-link {
+  font-size: 13px;
+  color: rgba(255, 255, 255, 0.88);
+  padding: 4px 2px;
 }
 .cls,
 .crs {

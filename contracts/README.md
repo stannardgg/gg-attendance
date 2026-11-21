@@ -20,8 +20,8 @@ contracts/
 ├─ enums/
 │  ├─ roles.json         # ADMIN / TEACHER / STUDENT
 │  ├─ statuses.json      # 9 组状态机 + rejectGate 小写归因标签
-│  ├─ actions.json       # 只有 MOUTH_ONCE / MOUTH_TWICE
-│  └─ error-codes.json   # 33 个错误码，含 HTTP 状态与领域
+│  ├─ actions.json       # 4 个启用动作（张嘴 2 + 靠近/离远）+ 4 个禁用动作及原因
+│  └─ error-codes.json   # 34 个错误码，含 HTTP 状态与领域
 └─ scripts/
    ├─ check-contract.sh       # 扫 information_schema，拦 course.class_id 等
    └─ check-agent-tools.py    # 拦"返回含手机号""复合工具""L2 未要求确认"
@@ -52,7 +52,7 @@ CI 的 `契约校验` job 会自动跑这两组，任何一次改动都要过。
 |---|---|---|
 | **班级与课程解耦** | `course` 无 `class_id`；`class_group` 无 `course_id`；不建 `course_student` | `check-contract.sh` |
 | **课程 DTO 不得带 classId** | 请求体 `additionalProperties: false`，服务端未知字段校验 | `java-api.yaml` 的 `CourseCreateReq` |
-| 动作码 | 只有 `MOUTH_ONCE` / `MOUTH_TWICE` | `actions.json` + `check-agent-tools.py` |
+| 动作码 | 只用 `actions.json` 里 `enabled` 的 4 个：`MOUTH_ONCE` / `MOUTH_TWICE` / `MOVE_CLOSER` / `MOVE_AWAY` | `actions.json` + `check-agent-tools.py` |
 | 基线帧字段 | 统一 `baselineFrame`（Base64），响应含 `baselineDegraded` | `face-api.yaml` |
 | 会话 | 必须同时含 `class_id` 与 `course_id`，缺一 `FA-2001` | `V1__schema.sql` + `java-api.yaml` |
 | Agent 写接口 | 请求体 `{params, confirmToken?}`，响应含 `requiresConfirm`/`preview`/`confirmToken`/`expiresAt` | `internal.yaml` |

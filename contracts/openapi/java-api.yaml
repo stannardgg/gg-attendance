@@ -147,7 +147,11 @@ paths:
   /api/v1/mobile/sessions/active:
     get:
       tags: [mobile]
-      summary: 本人所在班级正在进行的签到
+      summary: 本人当前能签的场次（应到名单快照内、ACTIVE、未过期）
+      description: |
+        以 `session_expected` 快照为基表，不按 `student.class_id` 现算 ——
+        保证「首页列出来的场次，点进去一定换得到票」，且转班不会篡改历史名单。
+        最多返回 20 条，按 id 倒序。
       operationId: mobileActiveSessions
       responses:
         '200':
@@ -159,24 +163,18 @@ paths:
   /api/v1/mobile/sessions/{sid}/join:
     post:
       tags: [mobile]
-      summary: 扫码后换取 checkinTicket
+      summary: 进入签到并换取 checkinTicket（无请求体）
       description: |
-        校验三件事：二维码 token（当前或前一 15s 窗口）、会话状态、**班级归属**
-        （`student.class_id == session.class_id`）。班级不符返回 `FA-3004`。
+        学生身份取自 JWT，会话取自路径参数，不需要二维码。
+
+        依次校验：① 会话状态且未过 `endAt`（否则 `FA-3001`）；
+        ② 应到名单包含该学生（否则 `FA-3004`）；③ 本场未签过（否则 `FA-3003`）；
+        ④ 本场没有待处理的申诉（否则 `FA-5001`「你已提交本次申诉」）——
+        申诉与签到互斥，提交后不可再参与该场次；⑤ 人脸档案为 `ACTIVE`（否则 `FA-4006`）。
         课程不参与校验 —— 应到名单只跟班级走（D7）。
       operationId: joinSession
       parameters:
         - $ref: '#/components/parameters/PathSessionId'
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              additionalProperties: false
-              required: [qrToken]
-              properties:
-                qrToken: { type: string, minLength: 16, maxLength: 16 }
       responses:
         '200':
           description: 票据已签发
@@ -187,7 +185,7 @@ paths:
         '403': { $ref: '#/components/responses/Forbidden' }
         '409': { $ref: '#/components/responses/Conflict' }
         '429': { $ref: '#/components/responses/TooManyRequests' }
-      x-error-codes: [FA-3001, FA-3002, FA-3003, FA-3004, FA-3005, FA-4006]
+      x-error-codes: [FA-3001, FA-3003, FA-3004, FA-3005, FA-4006, FA-5001]
 
   /api/v1/mobile/attendance/{sid}:
     get:
@@ -230,6 +228,8 @@ paths:
         一次提交 5~10 张样本的引用键（图片本身已通过 `/face-api/enroll/sample` 逐张上传并完成质量校验）。
         提交后 `face_profile.status` 转 `PENDING_REVIEW`，需教师审核通过才可变 `ACTIVE`（D5）。
         调用前必须已记录「单独同意」（`account.face_consent_at`），否则 400（§13.4）。
+        「一人一档」：提交前对全库他人档案做同脸查重（CR-014），命中即 `FA-4008` 整单拒绝，
+        不写向量、不写同意时间戳、不改档案状态。
       operationId: enrollFace
       requestBody:
         required: true
@@ -243,7 +243,8 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/FaceStatusResp' }
         '400': { $ref: '#/components/responses/BadRequest' }
-      x-error-codes: [FA-4001, FA-4002]
+        '409': { $ref: '#/components/responses/Conflict' }
+      x-error-codes: [FA-4001, FA-4002, FA-4008]
 
   /api/v1/mobile/face/status:
     get:
@@ -823,37 +824,6 @@ paths:
         '409': { $ref: '#/components/responses/Conflict' }
       x-error-codes: [FA-3001, FA-5002]
 
-  /api/v1/admin/sessions/{id}/rotate-qr:
-    post:
-      tags: [admin-session]
-      summary: 强制换码（qr_epoch += 1，旧码立即失效）
-      operationId: rotateQr
-      parameters:
-        - $ref: '#/components/parameters/PathId'
-      responses:
-        '200':
-          description: 新码
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/QrResp' }
-
-  /api/v1/admin/sessions/{id}/qrcode:
-    get:
-      tags: [admin-session]
-      summary: 取当前二维码 token（前端每 15 秒拉一次）
-      description: |
-        `token = Base32(HMAC-SHA256(SESSION_QR_SECRET, "{sessionId}|{qrEpoch}|{slice}"))[:16]`，
-        `slice = floor(epoch/15)`。返回 `qrUrl` 供大屏直接渲染二维码。
-      operationId: getQrCode
-      parameters:
-        - $ref: '#/components/parameters/PathId'
-      responses:
-        '200':
-          description: 当前码
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/QrResp' }
-
   /api/v1/admin/sessions/{id}/live:
     get:
       tags: [admin-session]
@@ -1170,7 +1140,7 @@ components:
         application/json:
           schema: { $ref: '#/components/schemas/ErrorResult' }
     Conflict:
-      description: 状态冲突（FA-1004 / FA-2002 / FA-2003 / FA-2005 / FA-3001 / FA-3003 / FA-5001）
+      description: 状态冲突（FA-1004 / FA-2002 / FA-2003 / FA-2005 / FA-3001 / FA-3003 / FA-4008 / FA-5001）
       content:
         application/json:
           schema: { $ref: '#/components/schemas/ErrorResult' }
@@ -1747,27 +1717,6 @@ components:
                   properties:
                     items: { type: array, items: { $ref: '#/components/schemas/Session' } }
 
-    QrData:
-      type: object
-      required: [sessionId, token, qrUrl, expiresAt, qrEpoch]
-      properties:
-        sessionId: { type: integer, format: int64 }
-        token: { type: string, minLength: 16, maxLength: 16 }
-        qrUrl:
-          type: string
-          description: 'https://<mobile-host>/checkin?sid={sessionId}&tk={token}'
-        expiresAt: { type: string, format: date-time, description: 本窗口结束时刻，前端据此倒计时 }
-        qrEpoch: { type: integer }
-        className: { type: string }
-        courseName: { type: string }
-
-    QrResp:
-      allOf:
-        - $ref: '#/components/schemas/Result'
-        - type: object
-          properties:
-            data: { $ref: '#/components/schemas/QrData' }
-
     # ---------- 移动端 ----------
     ActiveSession:
       type: object
@@ -1783,6 +1732,15 @@ components:
           type: string
           enum: [NOT_STARTED, IN_PROGRESS, PRESENT, LATE]
           description: IN_PROGRESS = 已 join 未完成
+        appealStatus:
+          # OAS 3.0 的 nullable 不能挂在 $ref 上，这里直接内联枚举，与 AppealStatus 保持一致
+          type: string
+          nullable: true
+          enum: [PENDING, APPROVED, REJECTED, WITHDRAWN]
+          description: |
+            本人对该场次**最新一条**申诉的状态；从未申诉为 null。
+            为 PENDING 时前端显示「申诉中」，并且 join 会以 FA-5001 拒绝再次进入
+            —— 已提交申诉的场次不可再参与签到。REJECTED / WITHDRAWN 之后仍可正常签到。
 
     ActiveSessionListResp:
       allOf:
@@ -1814,12 +1772,28 @@ components:
     MobileAttendance:
       type: object
       properties:
+        id:
+          type: integer
+          format: int64
+          description: attendance 主键；**还没有考勤记录时为 0**
         sessionId: { type: integer, format: int64 }
+        sessionTitle: { type: string }
         className: { type: string }
         courseName: { type: string }
-        status: { $ref: '#/components/schemas/AttendanceStatus' }
+        status:
+          # OAS 3.0 里 nullable 必须与 type 同级，不能挂在 allOf 上；枚举值与 AttendanceStatus 保持一致
+          type: string
+          nullable: true
+          enum: [PRESENT, LATE, ABSENT, LEAVE, EXEMPT]
+          description: |
+            会话进行中、本人尚未签到成功时没有 attendance 行，这里返回 **null**
+            （不再返回 FA-2001，否则学生刷脸失败后连申诉页都打不开）。
         checkinAt: { type: string, format: date-time, nullable: true }
-        canAppeal: { type: boolean }
+        canAppeal:
+          type: boolean
+          description: |
+            缺勤（ABSENT）与迟到（LATE）可申诉；会话进行中尚未签成功（status=null）同样可申诉。
+            已签成功 / 请假 / 免签为 false；已有在办申诉（PENDING/APPROVED）或会话关闭申诉入口时为 false。
         appealId: { type: integer, format: int64, nullable: true }
         appealStatus: { $ref: '#/components/schemas/AppealStatus' }
 

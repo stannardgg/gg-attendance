@@ -13,6 +13,8 @@ import { showToast } from 'vant'
 import { api, ApiError, enrollSample, messageOf } from '@/shared/api/client'
 import { auth, loadMe } from '@/shared/store/auth'
 import { useCamera } from '@/features/checkin/composables/useCamera'
+import { isWeChat } from '@/shared/utils'
+import WeChatGuard from '@/shared/components/WeChatGuard.vue'
 import type { EnrollReason, FaceStatusDetail } from '@/shared/api/types'
 
 const router = useRouter()
@@ -121,7 +123,11 @@ function removeLast() {
   samples.value = samples.value.slice(0, -1)
 }
 
-onMounted(startCamera)
+onMounted(() => {
+  // 微信内摄像头必挂：不启动摄像头，直接展示引导（与签到采集页同一道硬拦）
+  if (isWeChat()) return
+  void startCamera()
+})
 onBeforeUnmount(closeCamera)
 </script>
 
@@ -203,6 +209,9 @@ onBeforeUnmount(closeCamera)
         提交审核（{{ samples.length }}/{{ MIN_SAMPLES }}）
       </van-button>
     </div>
+
+    <!-- 微信内硬拦：摄像头必挂，不给继续选项 -->
+    <WeChatGuard v-if="isWeChat()" hard />
   </div>
 </template>
 

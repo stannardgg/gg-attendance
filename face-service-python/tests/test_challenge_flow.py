@@ -35,9 +35,9 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__fi
 CASIA = os.getenv("CASIA_DIR", os.path.join(REPO_ROOT, "Cleaned_CASIA_FaceV5"))
 
 
-def composite(img112, size=(720, 1280)):
+def composite(img112, size=(720, 1280), side=320):
     frame = np.full((size[0], size[1], 3), 60, dtype=np.uint8)
-    scale = 320 / min(img112.shape[:2])
+    scale = side / min(img112.shape[:2])
     face = cv2.resize(img112, (int(img112.shape[1] * scale), int(img112.shape[0] * scale)))
     fh, fw = face.shape[:2]
     y0, x0 = (size[0] - fh) // 2, (size[1] - fw) // 2
@@ -162,3 +162,87 @@ def test_baseline_missing_degrades(service, face_img):
     assert result["frames"] == 6
     # 降级后基线取自首帧，静态序列的动作门禁依然失败
     assert result["gates"]["actionCount"]["passed"] is False
+
+
+# ---------------- 尺度类动作：靠近 / 离远 ----------------
+
+
+def test_scale_action_never_picked_without_baseline(service):
+    """基线帧没有人脸时不得抽到尺度类动作：它们的判据是「相对基线的变化」，
+    没有基线就必然判失败，等于让学生替我们重来一次。"""
+    blank = np.full((720, 1280, 3), 90, dtype=np.uint8)
+    for i in range(8):
+        info = service.start(tickets.issue(1, 110 + i, f"jti-nb-{i}"), blank)
+        assert info["action"] not in ("MOVE_CLOSER", "MOVE_AWAY")
+
+
+def test_move_closer_passes_action_gate(service, face_img, monkeypatch):
+    from app.config import settings
+    monkeypatch.setattr(settings.action, "allow_action_hint", True)
+
+    base = composite(face_img)
+    near = composite(face_img, side=380)          # 放大 ~19%
+    info = service.start(tickets.issue(1, 120, "jti-closer"), base,
+                         action_hint="MOVE_CLOSER")
+    assert info["action"] == "MOVE_CLOSER"
+    assert info["needCount"] == 1
+    assert info["windowMs"] == settings.action.window_ms_scale
+    assert "靠近" in info["instruction"]
+
+    cid = info["challengeId"]
+    for seq in range(4):
+        service.frame(cid, base, seq=seq)
+    for seq in range(4, 10):
+        service.frame(cid, near, seq=seq)
+
+    result = service.finish(cid)
+    assert result["gates"]["actionCount"]["passed"] is True
+    assert result["detectedAction"] == 1
+
+
+def test_move_away_rejects_closer_sequence(service, face_img, monkeypatch):
+    """方向必须对：学生越靠越近，不能算「离远」做到了。"""
+    from app.config import settings
+    monkeypatch.setattr(settings.action, "allow_action_hint", True)
+
+    base = composite(face_img)
+    near = composite(face_img, side=380)
+    info = service.start(tickets.issue(1, 121, "jti-away"), base,
+                         action_hint="MOVE_AWAY")
+    cid = info["challengeId"]
+    for seq in range(4):
+        service.frame(cid, base, seq=seq)
+    for seq in range(4, 10):
+        service.frame(cid, near, seq=seq)
+
+    result = service.finish(cid)
+    assert result["gates"]["actionCount"]["passed"] is False
+    assert result["detectedAction"] == 0
+
+
+def test_move_away_passes_when_face_shrinks(service, face_img, monkeypatch):
+    from app.config import settings
+    monkeypatch.setattr(settings.action, "allow_action_hint", True)
+
+    base = composite(face_img)
+    far = composite(face_img, side=260)           # 缩小 ~19%
+    info = service.start(tickets.issue(1, 122, "jti-away-ok"), base,
+                         action_hint="MOVE_AWAY")
+    cid = info["challengeId"]
+    for seq in range(4):
+        service.frame(cid, base, seq=seq)
+    for seq in range(4, 10):
+        service.frame(cid, far, seq=seq)
+
+    result = service.finish(cid)
+    assert result["gates"]["actionCount"]["passed"] is True
+    assert result["detectedAction"] == 1
+
+
+def test_unknown_action_hint_rejected(service, face_img, monkeypatch):
+    """契约外的动作码不许进 attendance.action_seq。"""
+    from app.config import settings
+    monkeypatch.setattr(settings.action, "allow_action_hint", True)
+    with pytest.raises(ValueError):
+        service.start(tickets.issue(1, 123, "jti-bad"), composite(face_img),
+                      action_hint="TURN_LEFT")

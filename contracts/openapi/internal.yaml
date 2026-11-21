@@ -336,7 +336,7 @@ components:
         similarity: { type: number, format: double, minimum: 0, maximum: 1 }
         livenessMedian: { type: number, format: double, minimum: 0, maximum: 1 }
         identitySim: { type: number, format: double, minimum: 0, maximum: 1 }
-        actionSeq: { type: string, enum: [MOUTH_ONCE, MOUTH_TWICE] }
+        actionSeq: { type: string, enum: [MOUTH_ONCE, MOUTH_TWICE, MOVE_CLOSER, MOVE_AWAY] }
         actionCount: { type: integer, minimum: 0, maximum: 5 }
         matchedVectorId: { type: integer, format: int64, nullable: true }
         snapshotRef: { type: string, maxLength: 255, nullable: true }

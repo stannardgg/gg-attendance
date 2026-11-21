@@ -1,6 +1,6 @@
 {
-  "$comment": "动作可测性白名单。★ 只有这两个动作，眨眼/转头/点头在 v2.0 明确禁用（§4.4.1）。新增动作前必须先跑 scripts/probe_action.py 量出分离度 ≥3 倍标准差，否则不得上线。",
-  "version": "1.0.0",
+  "$comment": "动作可测性白名单。眨眼/转头/点头在 v2.0 明确禁用（§4.4.1）。新增动作前必须先跑 scripts/probe_action.py 量出分离度 ≥3 倍标准差，否则不得上线。",
+  "version": "1.1.0",
   "frozen": true,
   "actions": [
     {
@@ -35,6 +35,40 @@
         "riseRatio": 1.45
       },
       "note": "窗口 3.0s / 12 帧；实际收到 <10 帧时返回「网络不稳，请重试」而不判失败（§4.4.3）"
+    },
+    {
+      "code": "MOVE_CLOSER",
+      "label": "靠近",
+      "instruction": "请把脸靠近摄像头一点，保持半秒",
+      "need": 1,
+      "windowMs": 2500,
+      "minFrames": 8,
+      "enabled": true,
+      "criterion": {
+        "metric": "face_bbox_scale",
+        "base": "基线帧 sqrt(人脸框宽×高)/画面宽",
+        "segmentMinFrames": 2,
+        "delta": 0.18,
+        "direction": "closer"
+      },
+      "note": "CR-015。人脸已占画面 ≥80% 时该动作不参与随机（学生无法再靠近）"
+    },
+    {
+      "code": "MOVE_AWAY",
+      "label": "离远",
+      "instruction": "请把脸离摄像头远一点，保持半秒",
+      "need": 1,
+      "windowMs": 2500,
+      "minFrames": 8,
+      "enabled": true,
+      "criterion": {
+        "metric": "face_bbox_scale",
+        "base": "基线帧 sqrt(人脸框宽×高)/画面宽",
+        "segmentMinFrames": 2,
+        "delta": 0.18,
+        "direction": "away"
+      },
+      "note": "CR-015。缩 18% 后短边 <70px 时该动作不参与随机（会掉出检测下限）"
     }
   ],
   "disabled": [
@@ -43,5 +77,5 @@
     { "code": "TURN_RIGHT", "reason": "同上" },
     { "code": "NOD", "reason": "同上" }
   ],
-  "constraint": "★ 全局约束：关键点只用于定位 ROI，判动作用 ROI 内的亮度统计。任何用关键点开合比/角度做判据的实现都违背 v2.0（§4.4.1）"
+  "constraint": "★ 全局约束：关键点只用于定位 ROI 与 RGB 活体，判动作用「ROI 亮度统计」或「检测框尺度」。这两类信号都不经过 2d106det 的形状归一化；任何用关键点开合比/角度做判据的实现都违背 v2.0（§4.4.1）"
 }

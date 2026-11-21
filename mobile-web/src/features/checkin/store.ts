@@ -2,7 +2,7 @@
  * 签到会话上下文。
  *
  * 放 sessionStorage 而不是内存单例：学生在采集页手滑刷新（或 iOS 从后台恢复页面）
- * 不应该被踢回"重新扫码"。ticket 本身 TTL 只有 60 秒，落 sessionStorage 的风险可控。
+ * 不应该被踢回签到入口重新换票。ticket 本身 TTL 只有 60 秒，落 sessionStorage 的风险可控。
  */
 import { reactive } from 'vue'
 import type { JoinData } from '@/shared/api/types'

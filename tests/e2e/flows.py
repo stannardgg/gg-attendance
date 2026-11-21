@@ -1,4 +1,4 @@
-"""业务动作封装：把「建班/建课/开签到/扫码/挑战」这些流程写成函数。
+"""业务动作封装：把「建班/建课/开签到/进入签到/挑战」这些流程写成函数。
 
 测试用例只写断言，不重复拼 URL——URL 一改，改一处就够。
 所有路径以契约 contracts/openapi/*.yaml 为准。
@@ -86,27 +86,13 @@ def start_session(teacher: Client, class_id: int, course_id: int, title: str = "
     if late_after_sec is not None:
         body["lateAfterSec"] = late_after_sec
     r = teacher.ok("/api/v1/admin/sessions", body)
-    sid = int(r.data["id"])
-    qr = teacher.ok(f"/api/v1/admin/sessions/{sid}/qrcode", method="GET").data
-    return {"id": sid, "qrToken": qr["token"], "epoch": qr["qrEpoch"],
-            "expectedCount": r.data.get("expectedCount"), "qrUrl": qr.get("qrUrl"),
+    return {"id": int(r.data["id"]), "expectedCount": r.data.get("expectedCount"),
             "classId": r.data.get("classId"), "courseId": r.data.get("courseId")}
 
 
-def refresh_qr(teacher: Client, sid: int) -> dict:
-    qr = teacher.ok(f"/api/v1/admin/sessions/{sid}/qrcode", method="GET").data
-    return {"qrToken": qr["token"], "epoch": qr["qrEpoch"]}
-
-
-def rotate_qr(teacher: Client, sid: int) -> dict:
-    old = teacher.ok(f"/api/v1/admin/sessions/{sid}/rotate-qr", {}).data
-    fresh = refresh_qr(teacher, sid)
-    fresh["oldToken"] = old.get("token")
-    return fresh
-
-
-def join(student: Client, sid: int, qr_token: str):
-    return student.post(f"/api/v1/mobile/sessions/{sid}/join", {"qrToken": qr_token})
+def join(student: Client, sid: int):
+    """无请求体：身份来自 JWT，会话来自路径。"""
+    return student.post(f"/api/v1/mobile/sessions/{sid}/join")
 
 
 def attendance_of(student: Client, sid: int):
@@ -163,7 +149,11 @@ def checkin_frames(person: str, opens: tuple[int, ...] = (1, 2, 4, 5), n: int = 
     """取该人的第一张清晰样本造一整套签到帧，返回 (baseline, frames, bbox)。
 
     默认张两次（两段各 2 帧）：一次张嘴必须连续 ≥ hold_frames(2) 帧才计数，
-    而动作在 MOUTH_ONCE/MOUTH_TWICE 之间随机，只有造出两段才能两种都过。
+    造两段可以同时满足 `MOUTH_ONCE` 与 `MOUTH_TWICE`。
+
+    ★ 但调用方**必须显式传 action**：白名单现在有 4 个动作（CR-016 增加了靠近/离远），
+    随机抽到尺度类动作时，这套张嘴帧必然被判「动作次数不足」——
+    这里造的是嘴部序列，不是尺度序列。
     """
     images = synth.person_images(person)
     base = synth.composite(images[0])

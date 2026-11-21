@@ -115,8 +115,8 @@ onMounted(() => {
     <van-cell-group v-for="(it, i) in items" :key="`${it.sessionId}-${i}`" inset class="card-gap">
       <van-cell :title="it.className" :label="it.courseName">
         <template #value>
-          <span :style="{ color: statusColor[it.status], fontSize: '13px' }">
-            {{ statusLabel[it.status] }}
+          <span :style="{ color: it.status ? statusColor[it.status] : '#969799', fontSize: '13px' }">
+            {{ it.status ? statusLabel[it.status] : '未签到' }}
           </span>
         </template>
       </van-cell>
@@ -126,7 +126,7 @@ onMounted(() => {
         </template>
         <template #value>
           <van-button
-            v-if="it.canAppeal && it.status !== 'PRESENT' && !it.appealId"
+            v-if="it.canAppeal && !it.appealId"
             size="mini"
             plain
             type="primary"

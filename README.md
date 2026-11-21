@@ -1,6 +1,6 @@
 # 人脸签到系统（gg-attendance）
 
-基于人脸识别 + 指定动作活体的课堂签到系统。学生扫码签到，教师端实时看名单，Agent 可代为查询与操作。
+基于人脸识别 + 指定动作活体的课堂签到系统。教师发起签到后，学生手机端直接看到该场次并刷脸完成，教师端实时看名单，Agent 可代为查询与操作。
 
 > **当前状态**：文档已定稿（v2.0），工程基线（B0）已就绪，业务代码尚未开始。
 > 全部设计、契约与交付计划见 **[`项目文档.md`](项目文档.md)**（唯一事实来源）。
@@ -23,7 +23,7 @@
 | `face-service-python/` | 人脸检测、比对、活体、动作判定 | Python 3.11 + FastAPI + InsightFace | B3 |
 | `agent-service/` | LangGraph 编排 + Streamlit 界面，L0~L3 能力 | Python 3.11 + LangGraph | B5 |
 | `admin-web/` | 教师 / 管理员后台（含班级、课程管理） | Vue 3 + Vite + TS | B5 |
-| `mobile-web/` | 学生扫码签到端 | Vue 3 + Vite + TS + Vant | B5 |
+| `mobile-web/` | 学生签到端（首页直接进入进行中的签到，无需扫码） | Vue 3 + Vite + TS + Vant | B5 |
 | `deploy/` | Compose、Nginx、TLS、备份 | Docker Compose | B6 |
 
 ## 交付节奏
@@ -59,11 +59,11 @@ pip install pre-commit && pre-commit install
 
 全部服务配置了 `restart: unless-stopped`。启动成功标志：healthcheck 输出六服务 healthy + 6 个对外端点 `[OK]`。
 
-| 入口       | 地址                       |
-| ---------- | -------------------------- |
-| 后台管理端 | `https://localhost/admin/` |
-| 前台移动端 | `https://localhost/m/`     |
-| Agent      | `https://localhost/agent/` |
+| 入口       | 地址                     |
+| ---------- | ------------------------ |
+| 后台管理端 | https://localhost/admin/ |
+| 前台移动端 | https://localhost/m/     |
+| Agent      | https://localhost/agent/ |
 
 ### 启动项目（环境在 Docker 中，必须先 build）
 
@@ -87,7 +87,7 @@ docker compose --env-file .env down    # 删容器，但数据卷保留，重建
 
 ### 补充说明
 
-- 演示账号：教师张三工号 `191825611`、学生学号 `211`；密码不在仓库公开，见线下交付材料（管理员账号仅线下提供）。
+- 演示账号：教师张三工号 191825611、学生学号 `211`；密码不在仓库公开，见线下交付材料（管理员账号仅线下提供）。
 - **调试门 `fa-mysql-gate`**（宿主机 13306）是独立容器、不在 compose 栈里；若它停了，用 `docker start fa-mysql-gate` 单独拉起（仅开发调试用，不影响业务栈）。
 - **minio / e2e** 属于 profile 服务（archive/test），默认不启动，无需理会。
 - 首次在新机器部署时，`up -d` 会自动完成 Flyway 迁移和初始管理员创建，无需手动初始化。

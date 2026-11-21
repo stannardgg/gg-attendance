@@ -50,7 +50,7 @@ def chat(messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None = No
         body["tool_choice"] = "auto"
     url = f"{settings.llm_base_url}/chat/completions"
     try:
-        with httpx.Client(timeout=30) as client:
+        with httpx.Client(timeout=settings.llm_timeout_sec) as client:
             resp = client.post(
                 url,
                 json=body,
@@ -59,7 +59,9 @@ def chat(messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None = No
     except httpx.HTTPError as exc:
         raise LlmUnavailable(f"模型服务不可达：{exc}") from exc
     if resp.status_code >= 400:
-        raise LlmUnavailable(f"模型服务返回 {resp.status_code}")
+        # 只说"返回 403"没法排障：额度用尽、Key 没权限、模型不存在都是 403/404，
+        # 处理方式完全不同（充值 / 换 Key / 换模型）。把上游的错误码带出来。
+        raise LlmUnavailable(_describe_failure(resp))
     try:
         data = resp.json()
         message = data["choices"][0]["message"]
@@ -76,3 +78,32 @@ def chat(messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None = No
             parsed = {}
         calls.append(ToolCall(id=str(raw.get("id") or ""), name=str(fn.get("name") or ""), arguments=parsed))
     return Reply(content=str(message.get("content") or ""), tool_calls=calls)
+
+
+def _describe_failure(resp: httpx.Response) -> str:
+    """把上游错误体压成一句既能放到界面上、又能指向处置动作的话。
+
+    上游的 403 至少有三种含义：额度用尽、Key 没这个模型的权限、账号未开通。
+    只回一个数字，用户只能猜；带出 code 才知道该充值还是该换 Key。
+    """
+    code = message = ""
+    try:
+        raw = resp.json()
+        err = raw.get("error") if isinstance(raw, dict) else None
+        if isinstance(err, dict):
+            code = str(err.get("code") or err.get("type") or "")
+            message = str(err.get("message") or "")
+    except ValueError:
+        message = resp.text[:120]
+    log.warning("llm-http-%s code=%s message=%s", resp.status_code, code, message[:300])
+
+    if code in {"insufficient_quota", "AllocationQuota.FreeTierOnly"}:
+        return f"模型额度已用尽（{code}），请充值或关闭「仅用免费额度」"
+    if code in {"access_denied", "Model.AccessDenied"}:
+        return f"该 Key 未开通 {settings.llm_model}（{code}）"
+    if code == "model_not_found":
+        return f"模型 {settings.llm_model} 不存在或未开通（{code}）"
+    if resp.status_code == 429:
+        return "模型调用被限流（HTTP 429），请稍后重试"
+    detail = "：".join(x for x in (code, message[:80]) if x)
+    return f"模型服务返回 {resp.status_code}" + (f"（{detail}）" if detail else "")

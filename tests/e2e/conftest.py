@@ -27,7 +27,6 @@ FACE = os.environ.get("E2E_FACE", "http://face:8000")
 ADMIN_USER = os.environ.get("E2E_ADMIN_USER", "admin")
 ADMIN_PWD = os.environ.get("E2E_ADMIN_PWD", "")
 INTERNAL_TOKEN = os.environ.get("E2E_INTERNAL_TOKEN", "")
-QR_SECRET = os.environ.get("E2E_QR_SECRET", "")
 OUT_DIR = os.environ.get("E2E_OUT", "/out")
 
 # 每位「有脸」的学生用一个人：CASIA 目录名。

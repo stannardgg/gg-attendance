@@ -9,6 +9,7 @@ import java.time.Duration;
 import java.time.LocalDateTime;
 import java.util.Base64;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.redis.core.StringRedisTemplate;
@@ -33,12 +34,17 @@ public class AgentSsoService {
 
     private final StringRedisTemplate redis;
     private final ObjectMapper objectMapper;
+    private final AgentPrincipalResolver resolver;
+    private final AgentLevelService levels;
     private final String agentPublicUrl;
 
     public AgentSsoService(StringRedisTemplate redis, ObjectMapper objectMapper,
+                           AgentPrincipalResolver resolver, AgentLevelService levels,
                            @Value("${app.agent.public-url:http://localhost:8501}") String agentPublicUrl) {
         this.redis = redis;
         this.objectMapper = objectMapper;
+        this.resolver = resolver;
+        this.levels = levels;
         this.agentPublicUrl = agentPublicUrl;
     }
 
@@ -81,12 +87,31 @@ public class AgentSsoService {
         try {
             Map<String, Object> payload = objectMapper.readValue(raw, Map.class);
             String token = String.valueOf(payload.get("token"));
-            Map<String, Object> profile = new LinkedHashMap<>();
-            profile.put("accountId", payload.get("accountId"));
-            profile.put("role", payload.get("role"));
-            return new Exchanged(token, profile);
+            return new Exchanged(token, profileOf(token));
         } catch (JsonProcessingException e) {
             throw new BizException(ErrorCode.TOKEN_INVALID, "code 已失效，请从管理端重新打开");
         }
+    }
+
+    /**
+     * 组装交给 Agent 界面的身份快照。
+     *
+     * <p><b>数据范围必须在这里带上</b>：侧栏的「班级 N 个 / 课程 M 个」直接读
+     * {@code classIds/courseIds}，缺了它们，教师看到的永远是「0 个」——明明有权查，
+     * 界面上却像没接通任何数据，这类"看起来坏了"比真坏了更难查。
+     *
+     * <p>快照只用于展示：工具调用的鉴权仍走 {@code X-User-Token} 由
+     * {@link AgentPrincipalResolver} 现算，不信任这里的副本。
+     */
+    private Map<String, Object> profileOf(String token) {
+        AgentPrincipal principal = resolver.resolve(token);
+        Map<String, Object> profile = new LinkedHashMap<>();
+        profile.put("accountId", principal.accountId());
+        profile.put("role", principal.user().role());
+        profile.put("teacherId", principal.teacherId());
+        profile.put("levels", levels.levels());
+        profile.put("classIds", List.copyOf(principal.classIds()));
+        profile.put("courseIds", List.copyOf(principal.courseIds()));
+        return profile;
     }
 }
