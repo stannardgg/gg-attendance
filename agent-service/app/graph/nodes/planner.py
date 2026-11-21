@@ -34,7 +34,10 @@ _NAME_STATUS = re.compile(r"(?P<name>[\u4e00-\u9fa5]{2,4})(?P<when>今天|昨天
 _CLASS_RATE = re.compile(r"(?P<cls>.+?)(?:班|班级)?(?:的)?(?P<when>这周|本周|今天|近\d+周)?(?:的)?出勤率")
 
 # 疑问词出现在"人名"位置，说明这压根不是人名
-_QUESTION_WORDS = ("多少", "几", "哪些", "什么", "谁", "怎么", "如何")
+_QUESTION_WORDS = ("多少", "几", "哪些", "什么", "谁", "怎么", "如何", "各")
+# 泛指词出现在"班级"位置，说明没有具体班名："本周各班出勤率"里的"本周各"不是班名。
+# 规则解析不出 classId，必须交给模型反问/枚举，不能吐出"没有找到叫『本周各』的班级"。
+_GENERIC_SCOPE = ("各", "所有", "全部", "每个", "哪些", "哪个", "多少", "几")
 
 
 def plan(state: AgentState) -> dict:
@@ -181,24 +184,26 @@ def _plan_query(state: AgentState, text: str, steps: int) -> dict:
         name = _clean(m.group("cls"))
         when = m.group("when") or "这周"
         date_from, date_to = _range_for(when)
-        try:
-            clazz = resolver.resolve_class(name)
-            if clazz is not None:
-                return {"plan": [_step("get_class_stats", {
-                    "classId": int(clazz["id"]),
-                    "dateFrom": date_from.isoformat(),
-                    "dateTo": date_to.isoformat(),
-                })], "steps": steps + 1}
-            course = resolver.resolve_course(name)
-            if course is not None:
-                return {"plan": [_step("get_course_stats", {
-                    "courseId": int(course["id"]),
-                    "dateFrom": date_from.isoformat(),
-                    "dateTo": date_to.isoformat(),
-                })], "steps": steps + 1}
-        except ToolError as exc:
-            return {"plan": [], "answer": f"查询统计失败（{exc.code}）。"}
-        return {"plan": [], "answer": f"没有找到叫「{name}」的班级或课程。请确认名称。"}
+        # 泛指（"各班"/"所有班级"）解析不出唯一对象，直接落给模型；不落回"没找到"的分支
+        if name and not any(w in name for w in _GENERIC_SCOPE):
+            try:
+                clazz = resolver.resolve_class(name)
+                if clazz is not None:
+                    return {"plan": [_step("get_class_stats", {
+                        "classId": int(clazz["id"]),
+                        "dateFrom": date_from.isoformat(),
+                        "dateTo": date_to.isoformat(),
+                    })], "steps": steps + 1}
+                course = resolver.resolve_course(name)
+                if course is not None:
+                    return {"plan": [_step("get_course_stats", {
+                        "courseId": int(course["id"]),
+                        "dateFrom": date_from.isoformat(),
+                        "dateTo": date_to.isoformat(),
+                    })], "steps": steps + 1}
+            except ToolError as exc:
+                return {"plan": [], "answer": f"查询统计失败（{exc.code}）。"}
+            return {"plan": [], "answer": f"没有找到叫「{name}」的班级或课程。请确认名称。"}
 
     m = _NAME_STATUS.search(text)
     # 护栏：命中规则但"人名"里含疑问词，说明这是一个问句（"有多少场签到"），不是姓名
@@ -216,7 +221,9 @@ def _plan_query(state: AgentState, text: str, steps: int) -> dict:
         try:
             return _llm_plan(state, text, steps)
         except LlmUnavailable as exc:
+            # 静默降级等于"看起来模型没连上"：把原因带给用户，配置问题才有人查
             log.warning("llm-plan-unavailable %s", exc)
+            return {"plan": [], "answer": f"{guide_text()}\n\n> 本次未用上大模型：{exc}。已按规则兜底。"}
     return {"plan": [], "answer": guide_text()}
 
 
@@ -236,6 +243,10 @@ def _llm_plan(state: AgentState, text: str, steps: int) -> dict:
     done = [f"{r['tool']}({r['params']}) → {_brief(r['result'])}" for r in state.get("tool_results") or []]
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": SYSTEM_PROMPT},
+        # 不给日期，模型会回"我不掌握当前日期，请补日期"——规则层明明算得出来，
+        # 用户看到的就是"这助手不聪明"。日期由服务端给，不让模型自己推。
+        {"role": "system", "content": f"今天是 {today().isoformat()}，本周一 {monday_of_this_week().isoformat()}"
+                                      f"（都按 Asia/Shanghai）。用户说「今天/昨天/本周」时直接换算成日期参数。"},
         {"role": "system", "content": "可用工具（只能从中选，不要编造）: "
                                       + ", ".join(t["function"]["name"] for t in tools)},
         {"role": "user", "content": text},

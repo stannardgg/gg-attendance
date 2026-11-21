@@ -111,8 +111,9 @@ public class AppealService {
         try {
             appealMapper.insert(a);
         } catch (DuplicateKeyException e) {
-            // 生成列唯一索引：同一考勤只能有一条 PENDING
-            throw new BizException(ErrorCode.APPEAL_EXISTS);
+            // 生成列唯一索引：同一学生同一场次只能有一条 PENDING。
+            // 文案与 join 侧保持一致，学生看到的是同一句话（前端按 FA-5001 分支）。
+            throw new BizException(ErrorCode.APPEAL_EXISTS, "你已提交本次申诉");
         }
         audit.write("APPEAL_CREATE", "APPEAL", a.getId(), "学生申诉 session=" + req.sessionId());
         // 16.3 场景 9：教师端 1 秒内收到提醒。推到这场会话的实时通道上，
@@ -259,6 +260,7 @@ public class AppealService {
                 s == null ? null : courseNames.get(s.getCourseId()),
                 a.getReason(), a.getEvidenceKey() == null ? null : "/files/" + a.getEvidenceKey(),
                 a.getStatus(), a.getReply(), a.getHandledAt(), a.getCreatedAt(),
-                Boolean.TRUE.equals(s.getAllowAppeal()) && "PENDING".equals(a.getStatus()));
+                s != null && Boolean.TRUE.equals(s.getAllowAppeal())
+                        && "PENDING".equals(a.getStatus()));
     }
 }

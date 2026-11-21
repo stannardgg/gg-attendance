@@ -407,18 +407,6 @@ tools:
       properties:
         sessionId: { type: integer, format: int64 }
 
-  - name: rotate_qr
-    level: L2
-    requiresConfirm: true
-    undoable: true
-    title: 强制换码
-    params:
-      type: object
-      additionalProperties: false
-      required: [sessionId]
-      properties:
-        sessionId: { type: integer, format: int64 }
-
   - name: manual_checkin
     level: L2
     requiresConfirm: true

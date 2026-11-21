@@ -11,8 +11,8 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from app.challenge.action import MouthActionCounter
-from app.challenge.store import ChallengeState
+from app.challenge.action import MouthActionCounter, ScaleActionCounter
+from app.challenge.store import SCALE_ACTIONS, ChallengeState
 from app.config import settings
 from app.engine.landmark import cosine_similarity
 
@@ -54,7 +54,26 @@ def gate_action(st: ChallengeState) -> tuple[GateResult, int, int]:
 
     返回 (result, detected, required)。FA-4003 的 hint 要给出具体数值
     （「只检测到 1 次，要求 2 次」），所以 detected/required 必须单独返回。
+
+    两类判据：嘴部动作看 ROI 暗度（§4.4.2），尺度动作看检测框尺寸（§4.4.1）。
+    尺度类没有基线就无从判起——不做「序列首帧顶上」，那正是 4.4.2 明令禁止的
+    基线污染（学生已经在做动作，首帧就是污染值）。
     """
+    if st.action in SCALE_ACTIONS:
+        if st.baseline_scale <= 0:
+            return GateResult(False, 0.0, float(st.need)), 0, st.need
+        counter = ScaleActionCounter(
+            base_scale=st.baseline_scale,
+            closer=st.action == "MOVE_CLOSER",
+            delta=settings.action.scale_delta,
+            hold_frames=settings.action.scale_hold_frames,
+        )
+        for s in st.scales:
+            counter.observe(s)
+        detected, _ = counter.result()
+        ok = detected >= st.need
+        return GateResult(ok, float(detected), float(st.need)), detected, st.need
+
     counter = MouthActionCounter(
         base_ratio=st.baseline_ratio,
         abs_rise=settings.action.mouth_dark_abs,

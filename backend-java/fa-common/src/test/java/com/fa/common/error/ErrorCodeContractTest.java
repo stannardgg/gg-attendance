@@ -32,10 +32,10 @@ class ErrorCodeContractTest {
     }
 
     @Test
-    @DisplayName("契约里的 33 个码一个不少")
+    @DisplayName("契约里的 34 个码一个不少")
     void completeness() {
-        // contracts/enums/error-codes.json 的 codes 长度为 33
-        assertThat(ErrorCode.values()).hasSize(33);
+        // contracts/enums/error-codes.json 的 codes 长度为 34（CR-014 新增 FA-4008）
+        assertThat(ErrorCode.values()).hasSize(34);
     }
 
     @Test

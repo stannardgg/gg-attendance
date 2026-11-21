@@ -11,7 +11,7 @@ import java.util.List;
 
 /**
  * 签到域 DTO。字段严格对齐 contracts/openapi/java-api.yaml 的
- * SessionCreateReq / Session / QrData / JoinData / SessionContext / CheckinCommitReq。
+ * SessionCreateReq / Session / JoinData / SessionContext / CheckinCommitReq。
  */
 public final class CheckinDtos {
 
@@ -48,16 +48,6 @@ public final class CheckinDtos {
             long absentCount,
             LocalDateTime closedAt,
             LocalDateTime createdAt) {
-    }
-
-    public record QrData(
-            Long sessionId,
-            String token,
-            String qrUrl,
-            LocalDateTime expiresAt,
-            Integer qrEpoch,
-            String className,
-            String courseName) {
     }
 
     /** 内部 context：Python 用它快速拒绝不该签到的人。 */
@@ -97,15 +87,12 @@ public final class CheckinDtos {
     }
 
     /**
-     * join 请求体（契约 /mobile/sessions/{sid}/join 的 requestBody）。
+     * join 响应（契约 /mobile/sessions/{sid}/join）。
      *
-     * <p>qrToken 是「人到现场」的唯一凭证。少了它，任何知道 sessionId 的人
-     * 都能远程换票签到，二维码就退化成装饰品。
+     * <p>{@code challengeRequired} 恒为 true：取消二维码后刷脸是唯一通道，
+     * 字段保留是为了不动前端与契约结构。人脸档案不是 ACTIVE 时 join 直接
+     * 返回 FA-4006，不会有「简化签到」的响应。
      */
-    public record JoinReq(
-            @NotBlank @Size(min = 16, max = 16) String qrToken) {
-    }
-
     public record JoinData(
             String checkinTicket,
             int ttl,
@@ -125,9 +112,23 @@ public final class CheckinDtos {
             LocalDateTime startAt,
             LocalDateTime endAt,
             long remainingSec,
-            String myStatus) {
+            String myStatus,
+            /**
+             * 本人对该场次最新一条申诉的状态；从未申诉为 null。
+             *
+             * <p>目前前端只用 PENDING —— 有在办申诉时首页显示「申诉中」并拒绝进入采集页，
+             * 与后端 join 的 FA-5001 形成前后两道。其余状态（REJECTED/WITHDRAWN）照常可签。
+             */
+            String appealStatus) {
     }
 
+    /**
+     * 学生端单条考勤视图。
+     *
+     * <p>{@code status} 允许为 null：会话进行中且本人尚未签到成功时**没有** attendance 行，
+     * 但页面仍要显示班级/课程并允许发起申诉（AppealService 支持 attendanceId=0）。
+     * 以前这里直接抛 FA-2001，导致学生刷脸失败后点「提交申诉」只看到一排「—」。
+     */
     public record MobileAttendance(
             Long id,
             Long sessionId,
@@ -136,7 +137,9 @@ public final class CheckinDtos {
             String courseName,
             String status,
             LocalDateTime checkinAt,
-            boolean canAppeal) {
+            boolean canAppeal,
+            Long appealId,
+            String appealStatus) {
     }
 
     public record HistoryPage(List<MobileAttendance> items, long total, int page, int size) {

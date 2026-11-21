@@ -16,7 +16,7 @@ import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
 /**
- * 会话管理端点（§8.4 createSession / closeSession / rotateQr / getQrCode）。
+ * 会话管理端点（§8.4 createSession / closeSession / 会话查询）。
  *
  * <p>TEACHER 与 ADMIN 都能进，但 TEACHER 只能操作自己授权范围内的班级——
  * 过滤在 Service 层由 {@code @DataScope} 完成。
@@ -58,15 +58,5 @@ public class AdminSessionController {
     @PostMapping("/{id}/close")
     public Result<CheckinDtos.Session> close(@PathVariable long id) {
         return Result.ok(sessionService.close(id));
-    }
-
-    @PostMapping("/{id}/rotate-qr")
-    public Result<CheckinDtos.QrData> rotateQr(@PathVariable long id) {
-        return Result.ok(sessionService.rotateQr(id));
-    }
-
-    @GetMapping("/{id}/qrcode")
-    public Result<CheckinDtos.QrData> qrcode(@PathVariable long id) {
-        return Result.ok(sessionService.qrCode(id));
     }
 }

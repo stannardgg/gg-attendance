@@ -13,6 +13,7 @@
 import { ref, shallowRef } from 'vue'
 import { ApiError, faceRequest } from '@/shared/api/client'
 import { ERROR_MESSAGES } from '@/shared/api/errors'
+import { stripDataUrl } from '@/shared/utils'
 import type { ChallengeStartData, FinishData, FrameData } from '@/shared/api/types'
 import type { SmallFrame } from './useCamera'
 
@@ -104,7 +105,8 @@ export function useFrameUploader(opts: Options) {
       return
     }
     const body: Record<string, unknown> = {
-      baselineFrame: baseline.canvas.toDataURL('image/jpeg', 0.7),
+      // 契约要纯 base64；toDataURL 带 "data:image/jpeg;base64," 前缀，必须剥掉
+      baselineFrame: stripDataUrl(baseline.canvas.toDataURL('image/jpeg', 0.7)),
       deviceHash: opts.deviceHash()
     }
     try {
@@ -147,9 +149,12 @@ export function useFrameUploader(opts: Options) {
   }
 
   function enqueue(f: SmallFrame) {
+    // 队列满时丢弃**当前这一帧**，绝不能丢已编号的旧帧。
+    // seq 一旦出现空洞，服务端 st.seq 就永远追不上，之后每一帧都会被当乱序丢弃，
+    // 整场挑战直接报废——而前端对此完全无感（accepted=false 只是静默返回）。
     if (queue.length >= MAX_QUEUE) {
-      queue.shift()
       droppedFrames.value += 1
+      return
     }
     queue.push({ seq: seq++, blob: opts.toBlob(f) })
     void drain()
@@ -179,10 +184,19 @@ export function useFrameUploader(opts: Options) {
           fail(err)
           return
         }
-        if (state.value !== 'CAPTURING') return
+        if (state.value !== 'CAPTURING' && state.value !== 'SUBMITTING') return
       }
     } finally {
       uploading = false
+    }
+  }
+
+  /** 等上传队列排空。设上限是为了不让交卷被网络问题无限拖住。
+   *  上限按最坏情况留够：MOUTH_TWICE 窗口 3s、单帧 CPU 推理 ~0.85s，12 帧约 10s。 */
+  async function drainSettled(timeoutMs = 15000) {
+    const deadline = Date.now() + timeoutMs
+    while ((queue.length > 0 || uploading) && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 50))
     }
   }
 
@@ -214,6 +228,9 @@ export function useFrameUploader(opts: Options) {
     if (state.value === 'SUBMITTING' || state.value === 'DONE' || state.value === 'ERROR') return
     clearTimers()
     state.value = 'SUBMITTING'
+    // 交卷前必须把已采集的帧送完。服务端的动作计数按收到的帧序累计，
+    // 交卷早于尾帧到达会让这几帧永远进不了判定——用户看到的就是「动作没检测到」。
+    await drainSettled()
     try {
       const data = await faceRequest<FinishData>(
         `/face-api/challenge/${challenge.value?.challengeId}/finish`,

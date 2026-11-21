@@ -125,11 +125,9 @@ services:
       FA_VECTOR_AES_KEY: ${FA_VECTOR_AES_KEY:-}
       CONFIRM_TTL_SEC: ${CONFIRM_TTL_SEC:-60}
       UNDO_WINDOW_SEC: ${UNDO_WINDOW_SEC:-1800}
-      # 二维码密钥没有 application.yml 的 env 映射，用系统属性注入（Spring 优先级更高）
+      # 二维码已随 CR-013 取消，SESSION_QR_SECRET / app.mobile.public-url 不再注入
       JAVA_OPTS: >-
         -XX:MaxRAMPercentage=75 -XX:+UseG1GC
-        -Dapp.qr.secret=${SESSION_QR_SECRET}
-        -Dapp.mobile.public-url=${MOBILE_PUBLIC_URL:-https://localhost}
     depends_on:
       mysql:
         condition: service_healthy
@@ -168,10 +166,22 @@ services:
       FA_IDENTITY_SIM: ${IDENTITY_SIM:-0.55}
       # CR-010：允许验收脚本指定挑战动作。生产必须留 0，否则可预录指定动作。
       FA_ALLOW_ACTION_HINT: ${ALLOW_ACTION_HINT:-0}
+      # CR-016：动作白名单。回滚新动作（靠近/离远）只需改这里后重建容器，不必重建镜像。
+      FA_ACTION_WHITELIST: ${ACTION_WHITELIST:-MOUTH_ONCE,MOUTH_TWICE,MOVE_CLOSER,MOVE_AWAY}
+      FA_MOVE_SCALE_DELTA: ${MOVE_SCALE_DELTA:-0.18}
       # 压测放宽挑战 TTL（默认 60 = 契约值）：单机 CPU 推理 30 路并发时 finish 排队
       # 会超过 60s，排队超时的挑战被 Redis 删掉（R3 容量问题）。生产留默认。
       # 注意 face 的 config._get 会自动加 FA_ 前缀，这里必须用 FA_CHALLENGE_TTL_SEC。
       FA_CHALLENGE_TTL_SEC: ${FA_CHALLENGE_TTL_SEC:-60}
+      # CR-017：采集窗口运维开关。留空/不配 = 契约值 2000/3000/2500。
+      # 单机纯 CPU 推理 844ms/帧，契约窗口内只送得进 2~3 帧、动作判据靠运气，
+      # 本机开发需把 ONCE/TWICE/SCALE 调大（见 deploy/.env）；生产保持默认。
+      FA_WINDOW_MS_ONCE: ${WINDOW_MS_ONCE:-2000}
+      FA_WINDOW_MS_TWICE: ${WINDOW_MS_TWICE:-3000}
+      FA_WINDOW_MS_SCALE: ${WINDOW_MS_SCALE:-2500}
+      # 张嘴动作的「连续命中帧数」。契约值 2；CPU 环境采样间隔≈844ms 时只能命中 1 帧，
+      # 开发环境置 1 才可能通过。生产必须留 2（单帧防伪）。
+      FA_MOUTH_HOLD_FRAMES: ${MOUTH_HOLD_FRAMES:-2}
       FA_SYNC_ENABLED: "1"
       FA_SYNC_INTERVAL: ${VECTOR_SYNC_INTERVAL:-60}
     depends_on:
@@ -207,6 +217,10 @@ services:
       LLM_API_KEY: ${LLM_API_KEY:-}
       LLM_MODEL: ${LLM_MODEL:-}
       LLM_TEMPERATURE: ${LLM_TEMPERATURE:-0.2}
+      # 之前没透传：容器里取默认 1024，推理模型 reasoning 先吃掉大半预算，
+      # 正文被截成空串 → 静默降级成规则引导语，看起来像"没连上模型"
+      LLM_MAX_TOKENS: ${LLM_MAX_TOKENS:-2048}
+      LLM_TIMEOUT_SEC: ${LLM_TIMEOUT_SEC:-60}
       AGENT_LEVEL_L3: ${AGENT_LEVEL_L3:-false}
       CONFIRM_TTL_SEC: ${CONFIRM_TTL_SEC:-60}
       UNDO_WINDOW_SEC: ${UNDO_WINDOW_SEC:-1800}
@@ -297,8 +311,6 @@ services:
       E2E_ADMIN_USER: ${BOOTSTRAP_ADMIN_USERNAME:-admin}
       E2E_ADMIN_PWD: ${BOOTSTRAP_ADMIN_PASSWORD}
       E2E_INTERNAL_TOKEN: ${INTERNAL_TOKEN}
-      # 场景 03 要在本地算「45 秒前的码」，必须拿到与服务端相同的密钥
-      E2E_QR_SECRET: ${SESSION_QR_SECRET}
       E2E_DATASET: /dataset
       E2E_OUT: /out
       PYTHONPATH: /e2e:/app

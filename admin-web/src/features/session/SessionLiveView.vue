@@ -1,18 +1,19 @@
 <script setup lang="ts">
 /**
- * 二维码大屏。
+ * 签到实时大屏。
  *
  * 两个硬约束（§14.3 WP-10 验收）：
  * 1. 1920×1080 与 1366×768 下都不出现滚动条 —— 所以整页 overflow:hidden，
  *    字号用 clamp() 跟视口走，名单区放不下就用「还有 N 人」收口而不是滚动。
  * 2. 班级名与课程名必须并列常驻 —— 教师最容易出的错就是选反了班级和课程。
+ *
+ * 取消二维码后左栏不再是码，而是「学生端怎么进来」的三步指引。
  */
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import QRCode from 'qrcode'
 import { api, getToken, messageOf } from '@/shared/api/client'
-import type { AttendanceRow, QrData, SessionRow } from '@/shared/api/types'
+import type { AttendanceRow, SessionRow } from '@/shared/api/types'
 
 const route = useRoute()
 const router = useRouter()
@@ -20,17 +21,16 @@ const sessionId = Number(route.params.id)
 
 const session = ref<SessionRow | null>(null)
 const roster = ref<AttendanceRow[]>([])
-const qr = ref<QrData | null>(null)
-const qrCanvas = ref<HTMLCanvasElement | null>(null)
-const remaining = ref(0)
+const now = ref(Date.now())
 const connected = ref(false)
 const lastHit = ref<{ name: string; status: string; at: number } | null>(null)
 const loading = ref(true)
+/** 学生端入口：与 deploy/nginx 的 /m/ 前缀一致 */
+const mobileUrl = `${location.origin}/m/`
 
 let ws: WebSocket | null = null
-let qrTimer: number | undefined
-let tickTimer: number | undefined
 let rosterTimer: number | undefined
+let clock: number | undefined
 let retry = 0
 let alive = true
 
@@ -105,50 +105,6 @@ async function loadSession() {
   }
 }
 
-async function refreshQr() {
-  try {
-    const data = await api.get<QrData>(`/api/v1/admin/sessions/${sessionId}/qrcode`)
-    qr.value = data
-    await drawQr()
-    armQrTimer()
-  } catch (err) {
-    // 会话结束后服务端会拒绝发码，这里不弹 toast，避免大屏上盖一层错误提示
-    if (err instanceof Error) console.warn('取码失败', err.message)
-  }
-}
-
-async function drawQr() {
-  if (!qrCanvas.value || !qr.value?.qrUrl) return
-  try {
-    await QRCode.toCanvas(qrCanvas.value, qr.value.qrUrl, {
-      width: 420,
-      margin: 1,
-      errorCorrectionLevel: 'M',
-      color: { dark: '#000000', light: '#ffffff' }
-    })
-  } catch {
-    /* 极端长的 URL 才会失败，此时保留上一张码 */
-  }
-}
-
-/** 15 秒一个窗口：按 expiresAt 对齐，而不是盲目 setInterval(15s)，否则会拿到刚过期的码。 */
-function armQrTimer() {
-  window.clearTimeout(qrTimer)
-  const end = qr.value ? new Date(qr.value.expiresAt).getTime() : Date.now() + 15000
-  const wait = Math.max(1500, end - Date.now() + 250)
-  qrTimer = window.setTimeout(() => {
-    if (alive) refreshQr()
-  }, wait)
-}
-
-function tick() {
-  if (!qr.value) {
-    remaining.value = 0
-    return
-  }
-  remaining.value = Math.max(0, Math.round((new Date(qr.value.expiresAt).getTime() - Date.now()) / 1000))
-}
-
 /* ---------------- WebSocket ---------------- */
 
 function connect() {
@@ -211,7 +167,7 @@ function connect() {
 async function endSession() {
   try {
     await ElMessageBox.confirm(
-      `结束后，未签到的 ${expected.value - arrived.value} 人会补记为缺勤，且不能再扫码签到。确定结束吗？`,
+      `结束后，未签到的 ${expected.value - arrived.value} 人会补记为缺勤，且不能再签到。确定结束吗？`,
       '结束签到',
       { type: 'warning', confirmButtonText: '结束签到' }
     )
@@ -228,23 +184,6 @@ async function endSession() {
   }
 }
 
-async function rotate() {
-  try {
-    await ElMessageBox.confirm('换码后旧二维码立即失效。适合怀疑二维码被拍照外传时使用。', '强制换码', {
-      type: 'warning'
-    })
-  } catch {
-    return
-  }
-  try {
-    await api.post(`/api/v1/admin/sessions/${sessionId}/rotate-qr`)
-    await refreshQr()
-    ElMessage.success('已换码')
-  } catch (err) {
-    ElMessage.error(messageOf(err))
-  }
-}
-
 function toggleFullscreen() {
   if (document.fullscreenElement) document.exitFullscreen()
   else document.documentElement.requestFullscreen().catch(() => ElMessage.warning('浏览器不允许全屏'))
@@ -256,23 +195,34 @@ onMounted(async () => {
   loading.value = true
   await Promise.all([loadSession(), loadRoster()])
   loading.value = false
-  await refreshQr()
-  tickTimer = window.setInterval(tick, 1000)
-  tick()
+  clock = window.setInterval(() => (now.value = Date.now()), 1000)
   connect()
 })
 
 onBeforeUnmount(() => {
   alive = false
-  window.clearTimeout(qrTimer)
   window.clearTimeout(rosterTimer)
-  window.clearInterval(tickTimer)
+  window.clearInterval(clock)
   ws?.close()
 })
 
 const statusLabel = computed(() => {
   const s = session.value?.status
   return s === 'ACTIVE' ? '进行中' : s === 'CLOSED' ? '已结束' : s ? '已取消' : ''
+})
+
+/**
+ * 剩余时间由本地时钟算，不依赖后端轮询。
+ * 大屏必须让最后一排学生也看得清还剩多久 —— 这是 §8.2 对「大字号剩余时间」的要求。
+ */
+const remainSec = computed(() => {
+  if (!session.value) return 0
+  return Math.max(0, Math.round((new Date(session.value.endAt).getTime() - now.value) / 1000))
+})
+const remainText = computed(() => {
+  const s = remainSec.value
+  const m = Math.floor(s / 60)
+  return `${String(m).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`
 })
 </script>
 
@@ -297,7 +247,6 @@ const statusLabel = computed(() => {
       </div>
       <div class="ops">
         <el-button size="small" @click="toggleFullscreen">全屏</el-button>
-        <el-button v-if="session?.status === 'ACTIVE'" size="small" @click="rotate">换码</el-button>
         <el-button v-if="session?.status === 'ACTIVE'" size="small" type="warning" @click="endSession">
           结束签到
         </el-button>
@@ -306,19 +255,20 @@ const statusLabel = computed(() => {
     </header>
 
     <main class="body">
-      <!-- 左：二维码 -->
-      <section class="qr-panel">
-        <div class="qr-frame">
-          <canvas ref="qrCanvas" width="420" height="420" />
+      <!-- 左：学生端入口指引（不再投屏二维码） -->
+      <section class="entry-panel">
+        <div class="entry-title">学生端直接签到</div>
+        <div class="remain">
+          <span class="num" :class="{ over: remainSec === 0 }">{{ remainText }}</span>
+          <span class="unit">{{ remainSec === 0 ? '已结束' : '剩余' }}</span>
         </div>
-        <div class="qr-tip">用手机扫描二维码签到</div>
-        <div class="countdown">
-          <span class="sec">{{ remaining }}</span>
-          <span class="unit">秒后刷新</span>
-        </div>
-        <div class="progress">
-          <div class="bar" :style="{ width: `${Math.min(100, (remaining / 15) * 100)}%` }" />
-        </div>
+        <ol class="steps">
+          <li>用手机打开学生端并登录</li>
+          <li>在「进行中的签到」里点本场</li>
+          <li>按提示正对镜头刷脸</li>
+        </ol>
+        <div class="entry-url">{{ mobileUrl }}</div>
+        <div class="entry-hint">无需扫码 · 人脸活体与动作校验</div>
       </section>
 
       <!-- 右：实时人数与姓名墙 -->
@@ -455,60 +405,66 @@ const statusLabel = computed(() => {
   padding: 0 2vw 2vh;
 }
 
-.qr-panel {
+.entry-panel {
   display: flex;
   flex-direction: column;
   align-items: center;
   justify-content: center;
+  gap: 1.6vh;
   background: #111c33;
   border-radius: 16px;
-  padding: 1.5vh 0;
+  padding: 2vh 2vw;
   min-height: 0;
+  text-align: center;
 }
-.qr-frame {
-  background: #fff;
-  padding: 10px;
-  border-radius: 12px;
-  line-height: 0;
+.entry-title {
+  font-size: clamp(20px, 2vw, 36px);
+  font-weight: 700;
+  color: #f8fafc;
+  letter-spacing: 1px;
 }
-.qr-frame canvas {
-  width: min(30vw, 42vh);
-  height: min(30vw, 42vh);
-  image-rendering: pixelated;
-}
-.qr-tip {
-  margin-top: 1.6vh;
-  font-size: clamp(13px, 1.05vw, 18px);
+.steps {
+  margin: 0;
+  padding-left: 1.2em;
+  text-align: left;
   color: #cbd5e1;
+  font-size: clamp(13px, 1.05vw, 20px);
+  line-height: 2;
 }
-.countdown {
-  margin-top: 0.6vh;
+.remain {
   display: flex;
   align-items: baseline;
-  gap: 8px;
+  gap: 0.6vw;
+  margin: 0.4vh 0 0.2vh;
 }
-.countdown .sec {
-  font-size: clamp(22px, 2.1vw, 38px);
+.remain .num {
+  font-size: clamp(38px, 4.6vw, 88px);
   font-weight: 700;
   color: #38bdf8;
   font-variant-numeric: tabular-nums;
+  letter-spacing: 2px;
+  line-height: 1;
 }
-.countdown .unit {
-  font-size: clamp(11px, 0.85vw, 14px);
+.remain .num.over {
   color: #64748b;
 }
-.progress {
-  margin-top: 0.8vh;
-  width: 60%;
-  height: 4px;
-  background: #1e293b;
-  border-radius: 2px;
-  overflow: hidden;
+.remain .unit {
+  font-size: clamp(12px, 1vw, 18px);
+  color: #64748b;
 }
-.bar {
-  height: 100%;
-  background: #38bdf8;
-  transition: width 1s linear;
+.entry-url {
+  margin-top: 0.6vh;
+  padding: 0.9vh 1vw;
+  border-radius: 8px;
+  background: #16233d;
+  border: 1px solid #22304d;
+  color: #38bdf8;
+  font-size: clamp(12px, 1vw, 18px);
+  word-break: break-all;
+}
+.entry-hint {
+  color: #64748b;
+  font-size: clamp(11px, 0.9vw, 15px);
 }
 
 .live-panel {

@@ -7,6 +7,31 @@
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-11-21
+
+> 本版合并三批未发版改动：CR-013（取消二维码入口）、CR-014（建档同脸查重）、
+> CR-015（签到中可申诉 + 申诉互斥）、CR-016（动作库扩为 4 个），以及真机联调
+> 暴露的申诉/历史接口与基线帧编码修复。数据库迁移新增 V4。
+
+### Added
+- **动作库新增「靠近 / 离远」**（CR-016）：白名单扩为 4 个动作，新增 `MOVE_CLOSER` /
+  `MOVE_AWAY`。判据是人脸**检测框尺度**（`sqrt(框宽×框高) / 画面宽`）相对基线变化
+  ≥ 18% 且连续 ≥2 帧，窗口 2.5s / 10 帧，做 1 次。尺度是检测器在原图坐标下的几何量，
+  不经过 `2d106det` 的形状归一化，所以"转头"不会被打成"离远"（侧脸 30° 时框宽掉 13%、
+  几何平均只掉 7%）。抽样前剔除当前画面做不到的动作：脸已占满画面不抽「靠近」、
+  缩小后短边 <70px 不抽「离远」；`FA_ACTION_WHITELIST` 可不重建镜像摘除新动作。
+  `probe_action.py --scale` 实测静止波动 std=0.0131、分离度 13.7σ（门槛 3σ）。
+- **签到过程中的申诉与互斥**（CR-015）：同一场次存在 `PENDING` 申诉时，`join` 与内部
+  `commit` 均返回 `FA-5001`（文案「你已提交本次申诉」），该学生不可再参与本场签到；
+  `REJECTED` / `WITHDRAWN` 之后解除互斥。`GET /api/v1/mobile/sessions/active` 新增
+  `appealStatus`，移动端首页据此把场次标成「申诉中」并阻止进入采集页。采集页新增
+  常驻申诉入口（顶部 + 摄像头打不开的遮罩），不再只有「刷脸失败」的结果页才能申诉。
+- **建档同脸查重**（CR-014）：提交采集时把新样本与全库他人档案逐一比对，任一样本余弦
+  ≥ `DUP_FACE_SIM`（默认 0.55）即整单拒绝，返回新增的 `FA-4008`（409），不写向量、
+  不写同意时间戳、不改档案状态。此前同一张脸可被录进两个学号，签到时会因
+  `top1 - top2 < 0.06` 的余量规则把本人判成「像两个人」（2026-11-21 现场：学号 57/158
+  同脸 0.692，两次签到均 `FA-4005`）。新增 `FaceDuplicateChecker` 与 8 个纯逻辑单测。
+
 ### Security
 - **人脸向量字段级加密**（CR-012）：`face_vector.embedding` 以 AES-256-GCM 落库
   （密文 = 版本 1B + IV 12B + 密文 + tag 16B）。密钥 `FA_VECTOR_AES_KEY` 经
@@ -17,7 +42,33 @@
   （AES-256-CBC + PBKDF2 600k 轮，明文不落盘）；`restore.sh` 支持 `.enc` 备份，
   口令错在 openssl 阶段直接退出不污染目标库。
 
+### Fixed
+- **申诉页「记录加载失败」**：`CaptureView.goAppeal()` 先 `clearJoin()` 再读
+  `checkin.sid`，跳转成 `/appeal/null`，详情接口拿到非法路径参数，学生只看到
+  「记录加载失败，请稍后重试」。改为先取 sid 再清理；`AppealView` 对无效路由参数
+  就地提示「签到信息已过期，请从签到页重新进入」，不再发一次注定失败的请求。
+- **签到基线帧编码**：移动端把 `canvas.toDataURL()` 的整串（含 `data:image/jpeg;base64,`
+  前缀）当作 `baselineFrame` 发给 face 服务，`b64decode(validate=True)` 直接报
+  `Only base64 data is allowed`，真机第一次签到即失败。前端改为剥前缀（`stripDataUrl`），
+  服务端同时容忍 `data:` 前缀，新增 `tests/test_decode.py` 覆盖三种输入。
+- **申诉入口打不开**：`GET /mobile/attendance/{sid}` 在没有 attendance 行时抛 `FA-2001`，
+  学生刷脸失败后点「提交申诉」只看到三行「—」；且 `canAppeal` 只在 `LATE` 时为真，
+  与 §4.3「`ABSENT` 可申诉」相反。现改为：无记录返回 `status=null` + 班级/课程 + 可申诉；
+  `ABSENT`/`LATE`/未签成功均可申诉，已签成功/请假/免签不可；返回最近一条申诉的
+  `appealId/appealStatus`，刷新后仍能看到进度与撤回入口。
+- **`GET /mobile/attendance/history` 未实现**：契约与移动端「我的」页早已调用，
+  服务端没有映射（404）。现已补实现（分页 + 状态过滤，关联班级/课程名与最新申诉）。
+
 ### Changed
+- **取消二维码签到入口**（CR-013）：教师发起签到后，学生手机端首页直接列出本班进行中的
+  场次，点击即进入刷脸签到，不再需要扫码。`POST /api/v1/mobile/sessions/{sid}/join`
+  删除请求体（不再接收 `qrToken`）；`GET /api/v1/mobile/sessions/active` 改为返回数组
+  （最多 20 条，带 `myStatus`）；删除 `GET /admin/sessions/{id}/qrcode`、
+  `POST /admin/sessions/{id}/rotate-qr`、`QrTokenService`、`QrData`/`QrResp` schema
+  与 Agent 工具 `rotate_qr`；`SESSION_QR_SECRET` 从部署配置移除。作为补偿控制，
+  `join` 新增硬性前置——`face_profile.status` 必须为 `ACTIVE`，否则 `FA-4006`。
+  管理端大屏由二维码改为「签到指引 + 场次信息」，去掉换码按钮与 15 秒轮询。
+  `FA-3002` 保留编码但服务端不再返回；`checkin_session.qr_epoch` 列保留、不再读写。
 - §13.3 口径更新：人脸原图不落盘（face 服务内存处理后即丢弃），MinIO 仅在启用
   "人工复核看原图"需求时按对象加密 + 90 天清理落地（原稿与实现不符，CR-012 记录）。
 

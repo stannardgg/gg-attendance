@@ -10,6 +10,7 @@ import com.fa.org.api.dto.ScopeDtos;
 import com.fa.org.domain.FaceProfile;
 import com.fa.org.domain.FaceVector;
 import com.fa.org.domain.Student;
+import com.fa.org.infra.FaceDuplicateChecker;
 import com.fa.org.infra.FaceProfileMapper;
 import com.fa.org.infra.FaceVectorMapper;
 import com.fa.org.infra.StudentMapper;
@@ -49,6 +50,11 @@ import org.springframework.transaction.annotation.Transactional;
  * <p>状态机约束：{@code PENDING_REVIEW} / {@code ACTIVE} 期间不接受重新采集——
  * 前者会让审核人对着新旧混合的样本做判断，后者会把一个能签到的人瞬间打回待审核，
  * 正在上课的学生会直接签不上。要换照片必须先被驳回（REJECTED）。
+ *
+ * <p>一人一档（CR-014）：落库前先过 {@link FaceDuplicateChecker}，同一张脸已经在别人档案里
+ * （{@code ACTIVE}/{@code PENDING_REVIEW}）就整单拒绝，<b>不写</b>同意记录、向量与档案状态。
+ * 放在这里而不是审核环节：审核人看到的只有样本图，判断不了「这张脸是否已被另一个学号占用」，
+ * 等审核时才发现，样本已经躺在库里了。
  */
 @Service
 public class FaceEnrollService {
@@ -70,11 +76,12 @@ public class FaceEnrollService {
     private final AuditWriter audit;
     private final ObjectMapper json;
     private final VectorCrypto vectorCrypto;
+    private final FaceDuplicateChecker duplicateChecker;
 
     public FaceEnrollService(FaceProfileMapper profileMapper, FaceVectorMapper vectorMapper,
                              StudentMapper studentMapper, StringRedisTemplate redis,
                              JdbcTemplate jdbc, AuditWriter audit, ObjectMapper json,
-                             VectorCrypto vectorCrypto) {
+                             VectorCrypto vectorCrypto, FaceDuplicateChecker duplicateChecker) {
         this.profileMapper = profileMapper;
         this.vectorMapper = vectorMapper;
         this.studentMapper = studentMapper;
@@ -83,6 +90,7 @@ public class FaceEnrollService {
         this.audit = audit;
         this.json = json;
         this.vectorCrypto = vectorCrypto;
+        this.duplicateChecker = duplicateChecker;
     }
 
     /** 本人档案状态；从未采集返回 NONE（不建行，读接口不该有写副作用）。 */
@@ -115,6 +123,17 @@ public class FaceEnrollService {
         for (String key : keys) {
             vectors.add(readSample(studentId, key));
         }
+
+        // 一人一档（CR-014）：命中他人档案就整单拒绝，此时还没写任何东西。
+        // 查重放在 consent 之前——被拒的请求不该在账号上留下同意时间戳。
+        List<byte[]> probes = new ArrayList<>(vectors.size());
+        for (FaceVector v : vectors) {
+            probes.add(v.getEmbedding());
+        }
+        duplicateChecker.findConflict(studentId, probes).ifPresent(m -> {
+            throw new BizException(ErrorCode.FACE_ALREADY_ENROLLED,
+                    "这张人脸已用于其他学生档案，请联系老师核实");
+        });
 
         // 单独同意（§13.4）：没同意不许落库。账号维度记录时间与版本，便于回溯。
         writeConsent(student.getAccountId(), req.consentVersion());

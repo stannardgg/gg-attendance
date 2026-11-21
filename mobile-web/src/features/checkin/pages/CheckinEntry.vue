@@ -1,9 +1,12 @@
 <script setup lang="ts">
 /**
- * 扫码入口（§7.3）。
+ * 签到入口。
  *
- * 这一步只做三件事：换票据、把**班级与课程同时**摆给学生看、然后进采集页。
- * 换不到票据时每一类错误都要给出不同的下一步 —— "签到失败" 四个字对学生没有任何用。
+ * 取消二维码后这一步的职责变简单了：学生点哪一场就换哪一场的票据，
+ * 换到票据后**直接进采集页**，不再要求额外点一次"开始"——点场次本身就是意图。
+ * 采集页顶部常驻「班级 · 课程」，所以这里不需要再放一层确认页。
+ * 没带 sid（直接访问 /checkin）时，把本班进行中的场次列出来供选择。
+ * 换不到票据时按错误码给下一步 —— "签到失败"四个字对学生没有任何用。
  */
 import { computed, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
@@ -11,31 +14,38 @@ import { showToast } from 'vant'
 import { api, ApiError, messageOf } from '@/shared/api/client'
 import { refreshFaceStatus } from '@/shared/store/auth'
 import { mmss } from '@/shared/utils'
-import type { ActiveSession, JoinData, MobileAttendance } from '@/shared/api/types'
+import type { ActiveSession, JoinData } from '@/shared/api/types'
 import { setJoin } from '../store'
 
 const route = useRoute()
 const router = useRouter()
 
-const sid = Number(route.query.sid)
-const tk = String(route.query.tk ?? '')
+const sid = ref(Number(route.query.sid))
 const loading = ref(true)
-const joined = ref<JoinData | null>(null)
 const failCode = ref('')
 const failText = ref('')
 const sessions = ref<ActiveSession[]>([])
 
-const hasCode = computed(() => Number.isFinite(sid) && sid > 0 && tk.length >= 16)
+const hasSession = computed(() => Number.isFinite(sid.value) && sid.value > 0)
 
-async function join() {
+async function join(target = sid.value) {
+  if (!Number.isFinite(target) || target <= 0) {
+    loading.value = false
+    await loadSessions()
+    return
+  }
   loading.value = true
   failCode.value = ''
+  failText.value = ''
   try {
-    const data = await api.post<JoinData>(`/api/v1/mobile/sessions/${sid}/join`, { qrToken: tk })
-    joined.value = data
-    setJoin(sid, data)
+    // 无请求体：学生身份来自登录态，会话来自路径
+    const data = await api.post<JoinData>(`/api/v1/mobile/sessions/${target}/join`)
+    sid.value = target
+    setJoin(target, data)
     // 人脸状态在入口处核实一次：审核被驳回的学生不该走到采集页才失败
-    await refreshFaceStatus()
+    void refreshFaceStatus()
+    // 直接进采集页：多一次"开始"点击没有任何信息增量
+    router.replace(`/checkin/${target}`)
   } catch (err) {
     if (err instanceof ApiError) {
       failCode.value = err.code
@@ -52,28 +62,37 @@ async function join() {
 
 async function loadSessions() {
   try {
-    // 同 HomeView：契约是「单条或 null」，不是数组
-    const current = await api.get<ActiveSession | null>('/api/v1/mobile/sessions/active')
-    sessions.value = current ? [current] : []
+    sessions.value = await api.get<ActiveSession[]>('/api/v1/mobile/sessions/active')
   } catch {
     sessions.value = []
   }
 }
 
-function start() {
-  router.push(`/checkin/${sid}`)
+function enter(s: ActiveSession) {
+  // 已提交待处理申诉：本场不可再参与。后端 join 也会以 FA-5001 拒绝，
+  // 前端先拦一道只是省掉一次往返，并把「为什么点不动」当场说清楚。
+  if (s.appealStatus === 'PENDING') {
+    showToast('你已提交本次申诉')
+    return
+  }
+  if (s.myStatus === 'PRESENT' || s.myStatus === 'LATE') {
+    showToast('这场你已经签过了')
+    return
+  }
+  void join(s.sessionId)
 }
 
-/** 已签到过：直接跳到结果页的等价视图（用 attendance 接口取真实状态） */
-async function checkDone() {
-  try {
-    const a = await api.get<MobileAttendance>(`/api/v1/mobile/attendance/${sid}`)
-    if (a.status === 'PRESENT' || a.status === 'LATE') {
-      showToast(`你已经签到（${a.status === 'LATE' ? '迟到' : '已签到'}）`)
-    }
-  } catch {
-    /* 取不到就按普通失败处理 */
-  }
+/** 申诉中优先于签到状态：有在办申诉时，标签不能还写「待签到」 */
+function tagText(s: ActiveSession) {
+  if (s.appealStatus === 'PENDING') return '申诉中'
+  if (s.myStatus === 'PRESENT') return '已签到'
+  if (s.myStatus === 'LATE') return '迟到'
+  return '待签到'
+}
+
+function tagType(s: ActiveSession): 'primary' | 'success' | 'warning' {
+  if (s.appealStatus === 'PENDING') return 'warning'
+  return s.myStatus === 'PRESENT' || s.myStatus === 'LATE' ? 'success' : 'primary'
 }
 
 const faceHint = computed(() => {
@@ -81,93 +100,63 @@ const faceHint = computed(() => {
   return ''
 })
 
-onMounted(async () => {
-  if (!hasCode.value) {
-    loading.value = false
-    failCode.value = 'NO_CODE'
-    failText.value = '没有读到二维码内容，可以扫老师大屏上的二维码，或从下面选一场签到。'
-    await loadSessions()
-    return
-  }
-  await join()
+onMounted(() => {
+  void join()
 })
 
 const advice: Record<string, string> = {
   'FA-3001': '这场签到已经结束了，下一次课再签。',
-  'FA-3002': '二维码每 15 秒换一次，你扫到的已经过期了。对着大屏上的新码再扫一次。',
   'FA-3003': '你已经签过了，不用重复签。',
-  'FA-3004': '这场的应到名单里没有你，说明你不是这个班的学生。请确认扫的是本班的码。',
+  'FA-3004': '这场的应到名单里没有你，说明你不是这个班的学生。请联系任课老师核对名单。',
   'FA-3005': '这台手机上失败的次数太多了，稍等一会儿再试，或者提交申诉让老师核对。',
-  'FA-4006': '人脸档案未通过审核，先采集并通过审核。'
+  'FA-4006': '人脸档案未通过审核，先采集并通过审核。',
+  'FA-5001': '你已提交本次申诉，等老师处理即可，这场不用再签到。'
 }
 </script>
 
 <template>
   <div class="page">
     <div v-if="loading" class="center" style="height: 60vh">
-      <van-loading size="24">正在核对二维码…</van-loading>
+      <van-loading size="24">正在进入签到…</van-loading>
     </div>
-
-    <!-- 换到票据：把班级与课程并列摆出来，别让学生签错课 -->
-    <template v-else-if="joined">
-      <div class="panel">
-        <div class="label">本次签到</div>
-        <div class="cls">{{ joined.className }}</div>
-        <div class="crs">{{ joined.courseName }}</div>
-        <div class="meta">
-          <span v-if="joined.sessionTitle">{{ joined.sessionTitle }}</span>
-          <span v-if="joined.remainingSec">剩余 {{ mmss(joined.remainingSec) }}</span>
-        </div>
-      </div>
-
-      <van-notice-bar
-        v-if="!joined.challengeRequired"
-        wrapable
-        :scrollable="false"
-        type="primary"
-        text="本次签到已简化，直接确认即可完成。"
-        style="margin: 12px 0"
-      />
-
-      <div style="margin-top: 18px">
-        <van-button round block type="primary" size="large" @click="start">
-          开始签到
-        </van-button>
-      </div>
-      <p class="muted" style="text-align: center; margin-top: 12px">
-        开始后请正对镜头，按屏幕提示连续做两次张嘴动作。
-      </p>
-    </template>
 
     <!-- 换不到票据：按错误码给不同的下一步 -->
     <template v-else>
-      <van-empty image="error" :description="failText" />
-      <p class="muted" style="text-align: center; margin: -12px 20px 18px">
-        {{ advice[failCode] || '如果反复失败，请联系任课老师。' }}
-      </p>
+      <template v-if="hasSession">
+        <van-empty image="error" :description="failText" />
+        <p class="muted" style="text-align: center; margin: -12px 20px 18px">
+          {{ advice[failCode] || '如果反复失败，请联系任课老师。' }}
+        </p>
 
-      <div v-if="faceHint" style="margin: 0 16px 14px">
-        <van-button round block type="primary" @click="router.push('/face/enroll')">
-          去采集人脸
-        </van-button>
-      </div>
-
-      <template v-if="sessions.length">
-        <div class="section-title">当前进行中的签到</div>
-        <van-cell-group v-for="s in sessions" :key="s.sessionId" inset>
-          <van-cell :title="s.className" :label="s.courseName">
-            <template #value>
-              <span class="muted">{{ mmss(s.remainingSec) }}</span>
-            </template>
-          </van-cell>
-          <div class="row">
-            <van-button size="small" type="primary" plain @click="router.push('/')">
-              回首页
-            </van-button>
-            <van-button size="small" plain @click="checkDone">我已签过</van-button>
-          </div>
-        </van-cell-group>
+        <div v-if="faceHint" style="margin: 0 16px 14px">
+          <van-button round block type="primary" @click="router.push('/face/enroll')">
+            去采集人脸
+          </van-button>
+        </div>
       </template>
+
+      <div class="section-title">当前进行中的签到</div>
+      <van-empty
+        v-if="!sessions.length"
+        description="现在没有进行中的签到，等老师发起后再来"
+      />
+      <van-cell-group v-for="s in sessions" :key="s.sessionId" inset>
+        <van-cell
+          :title="s.className"
+          :label="`${s.courseName}${s.title ? ' · ' + s.title : ''}`"
+          is-link
+          @click="enter(s)"
+        >
+          <template #value>
+            <div class="right">
+              <span class="clock">{{ mmss(s.remainingSec) }}</span>
+              <van-tag :type="tagType(s)" plain>
+                {{ tagText(s) }}
+              </van-tag>
+            </div>
+          </template>
+        </van-cell>
+      </van-cell-group>
 
       <div style="margin: 22px 16px 0">
         <van-button round block plain type="primary" @click="router.replace('/')">回到首页</van-button>
@@ -177,48 +166,19 @@ const advice: Record<string, string> = {
 </template>
 
 <style scoped>
-.panel {
-  margin-top: 24px;
-  background: #fff;
-  border-radius: 14px;
-  padding: 22px 18px;
-  text-align: center;
-  box-shadow: 0 2px 12px rgba(0, 0, 0, 0.04);
-}
-.label {
-  font-size: 12px;
-  color: #969799;
-  letter-spacing: 2px;
-}
-.cls {
-  margin-top: 10px;
-  font-size: 24px;
-  font-weight: 700;
-  line-height: 1.3;
-}
-.crs {
-  margin-top: 4px;
-  font-size: 20px;
-  font-weight: 700;
-  color: #1989fa;
-  line-height: 1.3;
-}
-.meta {
-  margin-top: 10px;
-  display: flex;
-  justify-content: center;
-  gap: 12px;
-  font-size: 12px;
-  color: #969799;
-}
 .section-title {
   font-size: 13px;
   color: #969799;
   margin: 4px 4px 8px;
 }
-.row {
+.right {
   display: flex;
-  gap: 10px;
-  padding: 0 16px 12px;
+  align-items: center;
+  gap: 8px;
+}
+.clock {
+  font-variant-numeric: tabular-nums;
+  color: #1989fa;
+  font-size: 14px;
 }
 </style>

@@ -51,7 +51,7 @@
 | **B1** | 契约冻结 | WP-01 | 空库 `flyway migrate` 成功 + `openapi-generator validate` 通过 + 断言脚本能拦住 `course.class_id` | `feat/b1-wp01-contracts` | `contract-v1` |
 | **B2** | 身份与组织 | WP-02, WP-03 | 教师 A 查不到教师 B 的班级/课程/学生 + 班级/课程 CRUD 全通过 + 课程表无 `class_id` + 删有学生的班级被拒 + CSV 1000 行导入正确 | `feat/b2-wp02-auth`、`feat/b2-wp03-org` | `batch-2-done` |
 | **B3** | 人脸内核 | WP-05, WP-06, WP-07 | 动作次数准确率 ≥95% + 基线污染专项通过 + 照片攻击拒绝率 ≥99% + 4 worker 跨进程状态正确 | `feat/b3-wp05-face`、`feat/b3-wp06-liveness`、`feat/b3-wp07-orchestration` | `batch-3-done` |
-| **B4** | 签到主链路 | WP-04, WP-08 | **端到端签到跑通一次**（扫码→基线帧→动作→三道门禁→commit→大屏 +1）+ 异班学生被拒 + 申诉通过后考勤变 `PRESENT` | `feat/b4-wp04-checkin`、`feat/b4-wp08-appeal` | `batch-4-done` |
+| **B4** | 签到主链路 | WP-04, WP-08 | **端到端签到跑通一次**（首页进入→基线帧→动作→三道门禁→commit→大屏 +1）+ 异班学生被拒 + 未录脸学生被拒 + 申诉通过后考勤变 `PRESENT` | `feat/b4-wp04-checkin`、`feat/b4-wp08-appeal` | `batch-4-done` |
 | **B5** | 三端界面与 Agent | WP-09, WP-10, WP-11 | 三端操作真实数据 + Agent 写操作"预览→确认→执行→撤销"闭环 + 令牌过期/参数篡改被拦截 | `feat/b5-wp09-agent`、`feat/b5-wp10-admin`、`feat/b5-wp11-mobile` | `batch-5-done` |
 | **B6** | 部署与验收 | WP-12, WP-13 | 全新机器 `docker compose up -d` 10 分钟内全 healthy + 18 场景全过 + 备份可恢复 | `release/1.0.0` | `v1.0.0` + GitHub Release |
 
@@ -185,7 +185,7 @@ S6 推进
 | **B1** | ① 本批**只读** `项目文档.md`，不得修改它。② 只产出 DDL / `seed.sql` / 三份 OpenAPI / 枚举 / 错误码 / 断言脚本，不实现任何 Controller/Service。③ 断言脚本必须能拦住 `course.class_id` 与 `course_student` 残留。④ 完成后打 `contract-v1`，此后契约变更只走 CR。 |
 | **B2** | ① 不给 `course` 加任何班级字段，不建"课程-班级"映射（D7）。② 教师数据范围用 `teacher_scope` + `@DataScope`，必须验证"教师 A 查不到教师 B 的班级/课程/学生"。③ 删除仍有学生的班级必须拒绝（`FA-2005` 并提示学生数）。④ CSV 导入按 1000 行验收。⑤ 不碰签到、二维码、人脸推理，不改前端。 |
 | **B3** | ① 动作库只用可测性白名单（`MOUTH_ONCE` / `MOUTH_TWICE`），**不要用眨眼/转头做测试**（4fps 采样会丢失）。② 必须实现指令前基线帧 `baselineFrame` 与"连续段"判据，并跑基线污染专项。③ 三道硬门禁为 AND 关系，含首末帧身份一致性。④ 挑战状态存 Redis，4 worker 跨进程验证。⑤ 不写业务库、不改 Java、不做界面。 |
-| **B4** | ① 会话同时持 `class_id` + `course_id`，应到名单取快照。② 二维码轮换 + 20 秒前旧码必须 `FA-3002`。③ commit 幂等，同一学生第二次 `FA-3003`。④ **端到端跑通当天必须推送**。⑤ 不做界面、不改契约、不改人脸算法。 |
+| **B4** | ① 会话同时持 `class_id` + `course_id`，应到名单取快照。② **入口无二维码**（CR-013）：`join` 不带 `qrToken`，必须校验班级归属 + 应到名单 + `face_profile.status=ACTIVE`（否则 `FA-4006`）。③ commit 幂等，同一学生第二次 `FA-3003`。④ **端到端跑通当天必须推送**。⑤ 不做界面、不改契约、不改人脸算法。 |
 | **B5** | ① 不改后端契约；发现问题只提 CR，不直接改 Java/Python。② Agent 写操作必须"预览→确认→执行→撤销"闭环，令牌过期 `FA-6002`、参数篡改 `FA-6003` 均不执行。③ 移动端必须落实六类运行时约束与 `BASELINE` 状态。④ 每完成一个页面即提交。 |
 | **B6** | ① 不加新功能；只允许修 bug，且每条 bug 单独提交并说明。② 全新机器 10 分钟内全部 healthy 为硬 Gate。③ 18 个系统场景全过，包含"背景 40px 小脸不误拦"与"基线污染判通过"。④ 备份必须实际恢复演练一次。⑤ 打 `v1.0.0` 并发 GitHub Release。 |
 

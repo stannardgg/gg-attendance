@@ -1,4 +1,4 @@
-"""动作判定：固定 ROI + 亮度统计 + 连续段计数。
+"""动作判定：固定 ROI + 亮度统计 + 连续段计数；尺度类动作用检测框尺寸。
 
 实现的是项目文档 §4.4.2 的核心设计，三条铁律在这里固化：
 
@@ -12,6 +12,12 @@
 
 3. **按连续段计数**。一次张嘴 = 暗度连续低于基线 ≥ hold_frames 帧的一段。
    不做连续段判断的话，抖动会被数成十几次。
+
+4. **尺度类动作（靠近 / 离远）看检测框尺寸，不看关键点**。
+   bbox 由 SCRFD 在原图像素坐标给出，没有经过 2d106det 的形状归一化，
+   「人脸在画面里变大 / 变小」就是它直接测量到的量。尺度取
+   `sqrt(宽 × 高)`（几何平均）而不是宽：侧脸 30° 会让 bbox 宽度缩 13%，
+   几何平均只缩 7%，避免把「转了下头」误判成「离远了」。
 """
 from __future__ import annotations
 
@@ -115,3 +121,87 @@ class MouthActionCounter:
     @property
     def observed_min(self) -> float:
         return self._min_ratio
+
+
+def face_scale(face, frame_width: int) -> float:
+    """人脸在画面中的线性尺度（无量纲，按画面宽度归一）。
+
+    为什么不直接用像素：客户端上传分辨率可能不同（480p / 720p），用像素做基线
+    换个分辨率就失效；除以画面宽度后，尺度只反映「人脸占画面多大」。
+    为什么用几何平均而不是宽：见模块 docstring 第 4 条（侧脸会缩宽）。
+    """
+    if frame_width <= 0 or face is None:
+        return 0.0
+    w = max(float(face.width), 1.0)
+    h = max(float(face.height), 1.0)
+    return float(np.sqrt(w * h) / frame_width)
+
+
+class ScaleActionCounter:
+    """按连续段统计「尺度朝指定方向变化」的次数（靠近 / 离远）。
+
+    与 MouthActionCounter 同构，只把判据从「暗度升高」换成「尺度远离基线」：
+
+      base_scale   基线帧的人脸尺度（指令下发之前的画面）
+      closer       True = 找「变大」的段；False = 找「变小」的段
+      delta        相对基线的变化比例（0.18 = 尺度变化 18%）
+      hold_frames  一次动作至少连续几帧（2 帧 @4fps = 0.5s）
+
+    方向必须相对基线判定，不能用「序列最大/最小之比」代替：那样「前后晃一下」
+    一个动作同时满足靠近和离远，指令就退化成「随便动一下」。
+    """
+
+    def __init__(self, base_scale: float, closer: bool, delta: float = 0.18,
+                 hold_frames: int = 2):
+        self.base = max(float(base_scale), 1e-6)
+        self.closer = closer
+        self.delta = float(delta)
+        self.hold_frames = max(1, hold_frames)
+        self._run: list[float] = []
+        self._in_action = False
+        self._count = 0
+        self._segments: list[tuple[int, int]] = []
+        self._seg_start = 0
+        self._seq = 0
+        self._min_ratio = 1.0
+        self._max_ratio = 1.0
+
+    def observe(self, scale: float) -> None:
+        """喂入一帧的人脸尺度。顺序敏感，乱序帧不应调用。
+
+        无效帧（没检出人脸，scale<=0）记为「动作不成立」而不是 0：
+        当成 0 会让 MOVE_AWAY 白捡一次（0 必然小于 base*(1-delta)），
+        等于把「没检出」算成「学生做到了」。
+        """
+        active = False
+        if scale > 0:
+            ratio = float(scale) / self.base
+            self._min_ratio = min(self._min_ratio, ratio)
+            self._max_ratio = max(self._max_ratio, ratio)
+            active = (ratio >= 1.0 + self.delta) if self.closer \
+                else (ratio <= 1.0 - self.delta)
+
+        if active:
+            if not self._in_action:
+                self._in_action = True
+                self._seg_start = self._seq
+            self._run.append(scale)
+        else:
+            if self._in_action:
+                if len(self._run) >= self.hold_frames:
+                    self._count += 1
+                    self._segments.append((self._seg_start, self._seq - 1))
+                self._in_action = False
+                self._run = []
+        self._seq += 1
+
+    def result(self) -> tuple[int, list[tuple[int, int]]]:
+        """返回 (次数, 段列表)。结尾仍在动作中按已积累长度判定（同张嘴）。"""
+        if self._in_action and len(self._run) >= self.hold_frames:
+            return self._count + 1, self._segments + [(self._seg_start, self._seq - 1)]
+        return self._count, list(self._segments)
+
+    @property
+    def observed_range(self) -> tuple[float, float]:
+        """(最小, 最大) 尺度比，用于日志与申诉归因。"""
+        return self._min_ratio, self._max_ratio

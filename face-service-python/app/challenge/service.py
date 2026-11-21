@@ -10,18 +10,35 @@
 """
 from __future__ import annotations
 
+import logging
 import random
 
 import cv2
 import numpy as np
 
 from app.challenge import gates
-from app.challenge.action import mouth_dark_ratio
-from app.challenge.store import ChallengeState, ChallengeStore
+from app.challenge.action import face_scale, mouth_dark_ratio
+from app.challenge.store import SCALE_ACTIONS, ChallengeState, ChallengeStore
 from app.common.tickets import TicketError, parse
 from app.config import settings
 from app.engine import detector, embedder, landmarker, liveness
 from app.index.vectors import index
+
+logger = logging.getLogger("face-service")
+
+# 指令文案：尺度类动作与嘴部动作的措辞不同（「靠近」没有「几次」的概念）
+INSTRUCTIONS = {
+    "MOUTH_ONCE": "请张一次嘴，约半秒",
+    "MOUTH_TWICE": "请张两次嘴，每次约半秒",
+    "MOVE_CLOSER": "请把脸靠近摄像头一点，保持半秒",
+    "MOVE_AWAY": "请把脸离摄像头远一点，保持半秒",
+}
+
+# 动作未达成时的实时提示（进度提示由 _hint 统一拼）
+HINTS = {
+    "MOVE_CLOSER": "请再靠近一点",
+    "MOVE_AWAY": "请再离远一点",
+}
 
 
 class ChallengeService:
@@ -39,11 +56,8 @@ class ChallengeService:
         session_id = int(claims["sid"])
         student_id = int(claims["studentId"])
 
-        # 动作从白名单里**随机**选（§4.4.3）：固定动作等于给预录视频一个稳定的靶子。
-        # CR-010 之前这里写死 MOUTH_ONCE，MOUTH_TWICE 从来没有跑过。
-        action = self._pick_action(action_hint)
-
         baseline_ratio: float | None = None
+        baseline_scale = 0.0
         degraded = True
         roi: tuple[int, int, int, int] | None = None
 
@@ -56,6 +70,7 @@ class ChallengeService:
 
         face = detector().detect_largest(baseline_bgr)
         if face is not None:
+            baseline_scale = face_scale(face, baseline_bgr.shape[1])
             try:
                 pts, crop = landmarker().landmarks(baseline_bgr, face.bbox)
                 rect = landmarker().mouth_rect(pts)
@@ -66,6 +81,11 @@ class ChallengeService:
             except ValueError:
                 degraded = True
 
+        # 动作必须在基线之后选：尺度类动作的判据就是"相对基线的变化"，
+        # 而且还要看这张脸此刻有没有"靠近 / 离远"的余地（见 _action_eligible）。
+        # 动作从白名单里**随机**选（§4.4.3）：固定动作等于给预录视频一个稳定的靶子。
+        action = self._pick_action(action_hint, face, baseline_bgr)
+
         st = self.store.create(
             session_id=session_id,
             student_id=student_id,
@@ -73,6 +93,7 @@ class ChallengeService:
             action=action,
             baseline_ratio=baseline_ratio if baseline_ratio is not None else 0.02,
             baseline_degraded=degraded,
+            baseline_scale=baseline_scale,
         )
         if roi is not None:
             st.roi_x1, st.roi_y1, st.roi_x2, st.roi_y2 = roi
@@ -81,8 +102,7 @@ class ChallengeService:
         return {
             "challengeId": st.challenge_id,
             "action": st.action,
-            "instruction": ("请张两次嘴，每次约半秒" if st.action == "MOUTH_TWICE"
-                            else "请张一次嘴，约半秒"),
+            "instruction": INSTRUCTIONS.get(st.action, "请按提示完成动作"),
             "windowMs": st.window_ms,
             "minFrames": st.min_frames,
             "baselineDegraded": st.baseline_degraded,
@@ -90,15 +110,45 @@ class ChallengeService:
             "expiresIn": settings.challenge.ttl_sec,
         }
 
-    def _pick_action(self, hint: str | None) -> str:
-        """随机取动作；仅当显式允许时采纳客户端 hint（CR-010）。"""
+    def _pick_action(self, hint: str | None, face, frame_bgr: np.ndarray) -> str:
+        """随机取动作；仅当显式允许时采纳客户端 hint（CR-010）。
+
+        随机前先剔除此刻**物理上做不到**的动作：
+          - 基线帧没有人脸 → 尺度类动作没有基线，判据无从谈起；
+          - 脸已经快占满画面 → 不能要求"再靠近"，学生做不到会被判失败；
+          - 脸太小 → 再离远就检不出人了，等于让他自己触发 FA-4001。
+        剔除只针对单个动作，不合格的那个退出抽签，其余照旧。
+        """
         whitelist = settings.action.action_whitelist
         if hint and settings.action.allow_action_hint and hint in whitelist:
+            # 验收/联调要能强制指定动作，包括故意指定"做不到"的组合
             return hint
         if hint and hint not in whitelist:
             # 契约外的动作码直接拒绝，避免把未知值写进 attendance.action_seq
             raise ValueError(f"未知动作码：{hint}")
-        return random.choice(whitelist)
+
+        candidates = [a for a in whitelist if self._action_eligible(a, face, frame_bgr)]
+        if not candidates:
+            # 兜底回到嘴部动作：它们不依赖人脸尺度，任何距离都能判
+            candidates = [a for a in whitelist if a not in SCALE_ACTIONS] or list(whitelist)
+        return random.choice(candidates)
+
+    @staticmethod
+    def _action_eligible(action: str, face, frame_bgr: np.ndarray) -> bool:
+        """该动作在当前画面上是否做得出来。只对尺度类动作有约束。"""
+        if action not in SCALE_ACTIONS:
+            return True
+        if face is None:
+            return False
+        frame_h = float(frame_bgr.shape[0])
+        delta = settings.action.scale_delta
+        long_side = max(float(face.width), float(face.height))
+        if action == "MOVE_CLOSER":
+            # 再放大 delta 之后仍要留在画面里：框被画面边缘截断时尺度就不再增长了，
+            # 学生越靠越近、比例却卡住，会被判失败。
+            return long_side * (1 + delta) <= frame_h * settings.action.scale_closer_max_frac
+        short_side = min(float(face.width), float(face.height))
+        return short_side * (1 - delta) >= settings.action.scale_away_min_px
 
     # ---------------- frame ----------------
     def frame(self, challenge_id: str, frame_bgr: np.ndarray, seq: int) -> dict:
@@ -107,11 +157,16 @@ class ChallengeService:
             raise LookupError("挑战不存在或已过期")
         if st.closed:
             raise PermissionError("该挑战已提交")
-        if seq != st.seq:
-            # 乱序帧直接丢弃：按 seq 顺序计数是动作统计正确性的前提
+        if seq < st.seq:
+            # 过期/重复帧（网络重传、客户端重排）直接丢弃，不动已有计数
             return {"accepted": False, "seq": seq, "hint": None,
                     "progress": self._progress(st), "detectedCount": self._count(st),
                     "requiredCount": st.need}
+        if seq > st.seq:
+            # 序号缺口：客户端队列丢过帧。不能按「乱序」永久拒收——
+            # st.seq 会卡在缺口处，之后每一帧都不相等，整场挑战剩下的窗口全废，
+            # 用户只看到「识别失败」而日志里一片 200。缺口按降采样处理，序号对齐到当前帧。
+            st.seq = seq
 
         faces = detector().detect(frame_bgr)
         big = [f for f in faces if f.width >= settings.challenge.multi_face_min_px]
@@ -127,7 +182,16 @@ class ChallengeService:
             return self._frame_resp(st, accepted=True, hint="请让其他人离开画面")
         st.multi_face_run = 0
 
-        if not big:
+        face = max(big, key=lambda f: f.area) if big else None
+        if face is None and st.action in SCALE_ACTIONS:
+            # 「离远」会把人脸缩小。仍按 90px 判「没有脸」的话，学生照做反而
+            # 被 FA-4001 中止——这是判据在惩罚正确的行为。尺度类动作放宽到
+            # subject_min_px；多脸计数仍用 90px，免得背景小脸打断正常签到。
+            small = [f for f in faces if f.width >= settings.challenge.subject_min_px]
+            if small:
+                face = max(small, key=lambda f: f.area)
+
+        if face is None:
             st.no_face_run += 1
             st.seq += 1            # 同上：无脸帧也算一帧
             if st.no_face_run >= settings.challenge.no_face_frames:
@@ -137,7 +201,6 @@ class ChallengeService:
             self.store.save(st)
             return self._frame_resp(st, accepted=True, hint="请正对摄像头")
 
-        face = max(big, key=lambda f: f.area)
         st.no_face_run = 0
 
         # ROI 未锁定（基线降级场景）→ 用当前帧的关键点锁定
@@ -149,6 +212,9 @@ class ChallengeService:
                 gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
                 st.baseline_ratio = mouth_dark_ratio(
                     gray[rect[1]:rect[3], rect[0]:rect[2]])
+            # 尺度基线缺失才补：只在 hint 强制指定尺度动作、而基线帧又没检到脸时走到这里
+            if st.baseline_scale <= 0:
+                st.baseline_scale = face_scale(face, frame_bgr.shape[1])
 
         aligned = landmarker().align_space(frame_bgr, face.bbox)
         gray = cv2.cvtColor(aligned, cv2.COLOR_BGR2GRAY)
@@ -165,6 +231,7 @@ class ChallengeService:
             st.live_probs.append(p)
 
         st.ratios.append(ratio)
+        st.scales.append(face_scale(face, frame_bgr.shape[1]))
         st.seq += 1
         self.store.save(st)
 
@@ -177,6 +244,9 @@ class ChallengeService:
             raise LookupError("挑战不存在或已过期")
 
         if st.baseline_degraded and st.roi_x1 < 0:
+            logger.warning("challenge finish cid=%s sid=%s student=%s reject=no_face "
+                           "frames=0 baselineDegraded=true", challenge_id,
+                           st.session_id, st.student_id)
             return {"passed": False, "rejectGate": "no_face",
                     "gates": {}, "similarity": None, "matchedStudentId": None,
                     "detectedAction": 0, "frames": 0, "baselineDegraded": True}
@@ -247,6 +317,17 @@ class ChallengeService:
                 result["rejectGate"] = "commit"
                 result["commitError"] = f"提交签到结果失败：{exc}"
 
+        # 判定明细必须落日志：finish 是 200 + 业务结果，网关只看到 200，
+        # 不记这一行的话「签到失败」在现场完全无法归因（只能靠帧耗时反推）。
+        logger.info(
+            "challenge finish cid=%s sid=%s student=%s action=%s passed=%s reject=%s "
+            "frames=%d detected=%d/%d gates=%s",
+            challenge_id, st.session_id, st.student_id, st.action, result["passed"],
+            result["rejectGate"], result["frames"], detected, st.need,
+            {k: (None if v.value is None else round(float(v.value), 3))
+             for k, v in all_gates.items()},
+        )
+
         return result
 
     # ---------------- helpers ----------------
@@ -261,7 +342,7 @@ class ChallengeService:
         if detected >= st.need:
             return None
         if detected == 0:
-            return "请张嘴"
+            return HINTS.get(st.action, "请张嘴")
         return f"已检测到 {detected} 次，还需 {st.need - detected} 次"
 
     def _frame_resp(self, st: ChallengeState, accepted: bool, hint: str | None) -> dict:

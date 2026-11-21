@@ -2,7 +2,7 @@
 
 为什么可以真并发签到：一场会话里每个学生只能签一次，但**同一班可以开多场**。
 开 10 场会话 × 3 名学生 = 30 条互不冲突的签到流水，每一条都要走完整的
-扫码 → 挑战 → 8 帧上传 → finish → 落库，这才压到了真实链路的每一段。
+进入签到 → 挑战 → 8 帧上传 → finish → 落库，这才压到了真实链路的每一段。
 
 口径：
   - 延迟 = 单条签到的端到端耗时（join + 挑战 + 8 帧 + finish），不是单次 HTTP
@@ -40,16 +40,18 @@ OUT = os.environ.get("E2E_OUT", "/out")
 STUDENT_PWD = flows.STUDENT_PWD
 
 
-def one_checkin(face: Client, student: dict, sid: int, qr: str) -> dict:
+def one_checkin(face: Client, student: dict, sid: int) -> dict:
     t0 = time.perf_counter()
     try:
-        j = flows.join(student["client"], sid, qr)
+        j = flows.join(student["client"], sid)
         if j.status != 200:
             return {"ok": False, "ms": 0, "why": f"join {j.code}"}
-        # 默认 opens=(1,2,4,5) 两段张嘴：服务端在 MOUTH_ONCE/TWICE 之间随机，
-        # 只造一段时随机到 TWICE 必被 actionCount 拒
+        # 造两段张嘴（opens=(1,2,4,5)），并显式指定 MOUTH_TWICE：
+        # 白名单有 4 个动作（CR-016 加了靠近/离远），随机抽到尺度类动作时
+        # 这套张嘴帧必被 actionCount 拒，压测就会把「抽错动作」记成「系统失败」。
         base, frames, _ = flows.checkin_frames(student["person"], n=8)
-        res = flows.run_challenge(face, j.data["checkinTicket"], frames, baseline=base)
+        res = flows.run_challenge(face, j.data["checkinTicket"], frames,
+                                  action="MOUTH_TWICE", baseline=base)
         ms = (time.perf_counter() - t0) * 1000
         ok = res.get("passed") is True and res.get("attendanceStatus") in ("PRESENT", "LATE")
         return {"ok": ok, "ms": ms, "why": None if ok else str(res)[:160]}
@@ -101,7 +103,7 @@ def main() -> int:
 
     t0 = time.perf_counter()
     with concurrent.futures.ThreadPoolExecutor(max_workers=len(tasks)) as pool:
-        futs = [pool.submit(one_checkin, Client(FACE), st, s["id"], s["qrToken"])
+        futs = [pool.submit(one_checkin, Client(FACE), st, s["id"])
                 for st, s in tasks]
         results = [f.result() for f in futs]
     total = time.perf_counter() - t0

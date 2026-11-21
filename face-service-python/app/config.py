@@ -94,11 +94,37 @@ class ActionConfig:
 
     mouth_dark_abs: float = 0.05
     mouth_rise_ratio: float = 1.45
-    mouth_hold_frames: int = 2
-    window_ms_once: int = 2000
-    window_ms_twice: int = 3000
+    # 连续多少帧达到阈值才算「一次」张嘴。契约值 2 的前提是 4fps 采集+
+    # 250ms 级推理，动作跨度内必然覆盖两个采样点；单机 CPU 844ms/帧时
+    # 稳态采样间隔≈844ms，500ms 的张口动作只能命中一帧，hold=2 等于必判失败。
+    # 允许 FA_MOUTH_HOLD_FRAMES 覆盖（开发环境置 1）。降为 1 会削弱单帧防伪，
+    # 但身份门禁与活体仍是主防线，生产必须留默认 2。
+    mouth_hold_frames: int = field(default_factory=lambda: _get_int("MOUTH_HOLD_FRAMES", 2))
+    # 采集窗口。契约值 2000/3000/2500 面向「推理跟得上 4fps 采集」的部署；
+    # 单机纯 CPU 实测 844ms/帧，2 秒窗口稳态只送进 2~3 帧，动作判据靠运气。
+    # 这三个值允许环境变量覆盖，只是**运维开关**，不改变门禁语义：
+    #   FA_WINDOW_MS_ONCE / FA_WINDOW_MS_TWICE / FA_WINDOW_MS_SCALE
+    # 延长窗口会略微削弱「短窗口防预录」的强度，活体与随机动作仍在，故可接受；
+    # 生产如需严格对齐契约，留空即回落到默认值。
+    window_ms_once: int = field(default_factory=lambda: _get_int("WINDOW_MS_ONCE", 2000))
+    window_ms_twice: int = field(default_factory=lambda: _get_int("WINDOW_MS_TWICE", 3000))
     min_frames: int = 8
-    action_whitelist: tuple = ("MOUTH_ONCE", "MOUTH_TWICE")
+    # 尺度类动作（MOVE_CLOSER / MOVE_AWAY，§4.4.1）：判据是检测框尺度相对基线的
+    # 变化比例。0.18 = 人脸占画面的大小变化 18%（40cm ↔ 47cm 量级），
+    # 检测框抖动实测约 1%（见 probe_action.py --scale），留足余量。
+    scale_delta: float = 0.18
+    scale_hold_frames: int = 2
+    window_ms_scale: int = field(default_factory=lambda: _get_int("WINDOW_MS_SCALE", 2500))
+    # 可做性门槛：基线已经把脸怼满画面时不能要求「再靠近」，脸太小时不能要求「再离远」。
+    # 命中门槛的动作不参与随机（否则学生物理上做不到，判失败是我们的错）。
+    scale_closer_max_frac: float = 0.80      # 人脸长边 / 画面高，超过则不做「靠近」
+    scale_away_min_px: float = 70.0          # 缩 18% 后仍 ≥70px 才允许「离远」
+    # 白名单可用 FA_ACTION_WHITELIST 覆盖（逗号分隔）：
+    # 新动作在真机标定完成前，运维可以不重建镜像就把它们摘下来。
+    action_whitelist: tuple = field(default_factory=lambda: tuple(
+        s.strip() for s in _get(
+            "ACTION_WHITELIST", "MOUTH_ONCE,MOUTH_TWICE,MOVE_CLOSER,MOVE_AWAY"
+        ).split(",") if s.strip()))
     # CR-010：挑战动作允许由请求指定。**默认关闭**——动作随机是防预录视频的一道
     # 保险，让客户端能自选动作等于把这道保险交回给攻击者。只有验收/联调环境
     # （需要稳定复现"要求 2 次只做 1 次"这类负例）才开。
@@ -120,6 +146,10 @@ class ChallengeConfig:
     multi_face_frames: int = 3
     multi_face_min_px: int = 90
     no_face_frames: int = 3
+    # 「离远」会把人脸缩小，如果仍按 90px 判「有没有脸」，学生照做反而被判 FA-4001。
+    # 尺度类动作的最小人脸尺寸单独放宽（多脸计数仍用 multi_face_min_px，
+    # 免得背景里的小脸把一次正常签到打断）。
+    subject_min_px: int = 60
 
 
 @dataclass

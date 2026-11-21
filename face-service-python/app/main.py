@@ -34,6 +34,14 @@ from app.engine.landmark import cosine_similarity
 from app.index.vectors import index
 
 logger = logging.getLogger("face-service")
+# uvicorn 只配置自己的 logger，这个业务 logger 没人配 handler 时
+# INFO 会被 root 的默认 WARNING 级别吃掉——判定明细等于没记。
+if not logger.handlers:
+    _h = logging.StreamHandler()
+    _h.setFormatter(logging.Formatter("%(asctime)s %(levelname)s [%(name)s] %(message)s"))
+    logger.addHandler(_h)
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
 
 app = FastAPI(title="人脸签到 · 人脸服务", version="0.1.0")
 _store = None

@@ -44,6 +44,7 @@ public enum ErrorCode {
     FACE_MISMATCH("FA-4005", HttpStatus.BAD_REQUEST, "人脸不匹配"),
     FACE_NOT_ACTIVE("FA-4006", HttpStatus.BAD_REQUEST, "人脸档案未通过审核"),
     IDENTITY_MISMATCH("FA-4007", HttpStatus.BAD_REQUEST, "身份校验未通过，请本人操作"),
+    FACE_ALREADY_ENROLLED("FA-4008", HttpStatus.CONFLICT, "这张人脸已用于其他学生档案"),
 
     // ---- 5xxx 申诉 ----
     APPEAL_EXISTS("FA-5001", HttpStatus.CONFLICT, "该记录已有待处理申诉"),

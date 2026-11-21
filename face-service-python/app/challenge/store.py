@@ -23,9 +23,22 @@ from app.config import settings
 
 PREFIX = "fa:challenge:"
 
+# 尺度类动作：判据是检测框尺度，不是嘴区暗度（见 challenge/action.py）
+SCALE_ACTIONS = ("MOVE_CLOSER", "MOVE_AWAY")
+
 ACTION_WINDOW = {
     "MOUTH_ONCE": settings.action.window_ms_once,
     "MOUTH_TWICE": settings.action.window_ms_twice,
+    "MOVE_CLOSER": settings.action.window_ms_scale,
+    "MOVE_AWAY": settings.action.window_ms_scale,
+}
+
+# 每个动作要完成几次。靠近/离远做一次就够——「连续靠近两次」没有物理意义。
+ACTION_NEED = {
+    "MOUTH_ONCE": 1,
+    "MOUTH_TWICE": 2,
+    "MOVE_CLOSER": 1,
+    "MOVE_AWAY": 1,
 }
 
 
@@ -37,7 +50,7 @@ class ChallengeState:
     session_id: int
     student_id: int
     ticket_jti: str
-    action: str                      # MOUTH_ONCE / MOUTH_TWICE
+    action: str                      # MOUTH_ONCE / MOUTH_TWICE / MOVE_CLOSER / MOVE_AWAY
     need: int                        # 需要完成的动作次数
     window_ms: int
     min_frames: int
@@ -46,6 +59,9 @@ class ChallengeState:
     baseline_degraded: bool          # 基线不可得、退回序列首帧
     seq: int = 0                     # 已接收帧数（也用作下一帧的 seq）
     ratios: list[float] = field(default_factory=list)
+    # 尺度类动作（靠近/离远）的每帧人脸尺度；默认 0 表示旧状态没有这个字段
+    baseline_scale: float = 0.0
+    scales: list[float] = field(default_factory=list)
     closed: bool = False             # 已 finish（无论成败），防止重复提交
     no_face_run: int = 0             # 连续无脸帧数
     multi_face_run: int = 0          # 连续多脸帧数
@@ -73,7 +89,8 @@ class ChallengeStore:
         return PREFIX + cid
 
     def create(self, session_id: int, student_id: int, ticket_jti: str,
-               action: str, baseline_ratio: float, baseline_degraded: bool) -> ChallengeState:
+               action: str, baseline_ratio: float, baseline_degraded: bool,
+               baseline_scale: float = 0.0) -> ChallengeState:
         cid = f"c_{uuid.uuid4().hex[:10]}"
         st = ChallengeState(
             challenge_id=cid,
@@ -81,12 +98,13 @@ class ChallengeStore:
             student_id=student_id,
             ticket_jti=ticket_jti,
             action=action,
-            need=1 if action == "MOUTH_ONCE" else 2,
+            need=ACTION_NEED.get(action, 1),
             window_ms=ACTION_WINDOW.get(action, settings.action.window_ms_once),
             min_frames=settings.action.min_frames,
             created_ms=int(time.time() * 1000),
             baseline_ratio=baseline_ratio,
             baseline_degraded=baseline_degraded,
+            baseline_scale=baseline_scale,
         )
         self.redis.set(self._key(cid), json.dumps(asdict(st)),
                        ex=settings.challenge.ttl_sec)

@@ -6,22 +6,28 @@ import com.fasterxml.jackson.databind.JsonNode;
 import java.util.Map;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpMethod;
 import org.springframework.http.ResponseEntity;
+import org.springframework.jdbc.core.JdbcTemplate;
 
 /**
  * B4 签到主链路（把本地 21 项冒烟转成 CI 用例）。
  *
- * <p>只保留**回归价值高**的判据：快照应到、二维码轮换、异班拒绝、
- * commit 幂等、相似度下限、结束后不可 join。UI 细节不在这里测。
+ * <p>只保留**回归价值高**的判据：快照应到、进行中列表、无码进入、
+ * 人脸档案硬门禁、异班拒绝、commit 幂等、相似度下限、结束后不可 join。
+ * UI 细节不在这里测。
  */
 class CheckinFlowIT extends ItBase {
 
     private static final String ADMIN = "admin";
     private static final String ADMIN_PWD = "Admin@12345";
     private static final String INTERNAL = "dev-internal-token";
+
+    @Autowired
+    private JdbcTemplate jdbc;
 
     private ResponseEntity<JsonNode> internalPost(String path, Object body) {
         HttpHeaders h = new HttpHeaders();
@@ -81,31 +87,34 @@ class CheckinFlowIT extends ItBase {
         assertThat(sess.path("className").asText()).isNotBlank();
         assertThat(sess.path("courseName").asText()).isNotBlank();
 
-        // 二维码
-        JsonNode qr = get("/api/v1/admin/sessions/" + sid + "/qrcode", teacher).getBody().path("data");
-        assertThat(qr.path("token").asText()).hasSize(16);
-        int epoch = qr.path("qrEpoch").asInt();
-        // 换码后旧 token 立刻失效（qrEpoch 进了签名），必须重新取一次
-        JsonNode rotated = post("/api/v1/admin/sessions/" + sid + "/rotate-qr", null, teacher)
-                .getBody().path("data");
-        assertThat(rotated.path("qrEpoch").asInt()).isEqualTo(epoch + 1);
-        String freshQr = get("/api/v1/admin/sessions/" + sid + "/qrcode", teacher)
-                .getBody().path("data").path("token").asText();
-
-        // 学生 join
+        // 无二维码：学生端直接列出本班进行中的签到
         post("/api/v1/auth/student/activate", Map.of("studentNo", "FS" + s + "1", "name", "学生1",
                 "classCode", "FC" + s, "password", "Student12345"), null);
+        post("/api/v1/auth/student/activate", Map.of("studentNo", "FS" + s + "2", "name", "学生2",
+                "classCode", "FC" + s, "password", "Student12345"), null);
         String stu = login("FS" + s + "1", "Student12345");
-        // 旧码必须被拒（16.3 场景 3 的接口级版本）
-        ResponseEntity<JsonNode> staleQr = post("/api/v1/mobile/sessions/" + sid + "/join",
-                Map.of("qrToken", qr.path("token").asText()), stu);
-        assertThat(staleQr.getStatusCode().value()).isEqualTo(400);
-        assertThat(code(staleQr)).isEqualTo("FA-3002");
+        String stu2 = login("FS" + s + "2", "Student12345");
 
-        ResponseEntity<JsonNode> join = post("/api/v1/mobile/sessions/" + sid + "/join",
-                Map.of("qrToken", freshQr), stu);
+        ResponseEntity<JsonNode> active = get("/api/v1/mobile/sessions/active", stu);
+        assertThat(active.getStatusCode().value()).isEqualTo(200);
+        JsonNode activeList = active.getBody().path("data");
+        assertThat(activeList.isArray()).as("active 必须是数组").isTrue();
+        assertThat(activeList.findValuesAsText("sessionId")).contains(String.valueOf(sid));
+
+        // 只保留刷脸：没有人脸档案 → FA-4006，且不签发票据
+        ResponseEntity<JsonNode> noFace = post("/api/v1/mobile/sessions/" + sid + "/join", null, stu2);
+        assertThat(noFace.getStatusCode().value()).isEqualTo(400);
+        assertThat(code(noFace)).isEqualTo("FA-4006");
+
+        // 人脸档案 ACTIVE 后才放行（本 IT 不跑真实采集，直接置状态）
+        jdbc.update("INSERT INTO face_profile (student_id, status, sample_count) "
+                + "VALUES (?, 'ACTIVE', 5)", s1);
+
+        // 学生 join：无请求体、无 token，身份完全来自 JWT
+        ResponseEntity<JsonNode> join = post("/api/v1/mobile/sessions/" + sid + "/join", null, stu);
         assertThat(join.getStatusCode().value()).isEqualTo(200);
         assertThat(join.getBody().path("data").path("checkinTicket").asText()).isNotBlank();
+        assertThat(join.getBody().path("data").path("challengeRequired").asBoolean()).isTrue();
 
         // commit
         Map<String, Object> body = Map.of(
@@ -144,8 +153,7 @@ class CheckinFlowIT extends ItBase {
         assertThat(closed.path("absentCount").asInt()).as("未签到的应到学生补 ABSENT").isEqualTo(1);
 
         // 结束后不能再 join
-        ResponseEntity<JsonNode> afterClose = post("/api/v1/mobile/sessions/" + sid + "/join",
-                Map.of("qrToken", freshQr), stu);
+        ResponseEntity<JsonNode> afterClose = post("/api/v1/mobile/sessions/" + sid + "/join", null, stu);
         assertThat(afterClose.getStatusCode().value()).isEqualTo(409);
         assertThat(code(afterClose)).isEqualTo("FA-3001");
     }
@@ -191,5 +199,70 @@ class CheckinFlowIT extends ItBase {
 
         JsonNode att = get("/api/v1/mobile/attendance/" + sid, stu).getBody().path("data");
         assertThat(att.path("status").asText()).as("申诉通过后变 PRESENT").isEqualTo("PRESENT");
+    }
+
+    @Test
+    @DisplayName("进行中申诉：提交后本场不可再参与（join/commit 均 FA-5001，首页标申诉中）")
+    void appealWhileActiveBlocksCheckin() {
+        String admin = login(ADMIN, ADMIN_PWD);
+        String s = suffix();
+        long cid = post("/api/v1/admin/classes",
+                Map.of("code", "WC" + s, "name", "进行中申诉班" + s), admin)
+                .getBody().path("data").path("id").asLong();
+        long kid = post("/api/v1/admin/courses",
+                Map.of("code", "WK" + s.toUpperCase(), "name", "进行中申诉课"), admin)
+                .getBody().path("data").path("id").asLong();
+        long tid = post("/api/v1/admin/teachers",
+                Map.of("teacherNo", "WT" + s, "name", "进行中申诉教师", "password", "Teacher12345"), admin)
+                .getBody().path("data").path("id").asLong();
+        for (String[] p : new String[][]{{"CLASS", String.valueOf(cid)}, {"COURSE", String.valueOf(kid)}}) {
+            post("/api/v1/admin/teacher-scopes",
+                    Map.of("teacherId", tid, "scopeType", p[0], "scopeId", Long.parseLong(p[1])), admin);
+        }
+        long stuId = post("/api/v1/admin/students",
+                Map.of("studentNo", "WS" + s, "name", "进行中申诉生", "classId", cid), admin)
+                .getBody().path("data").path("id").asLong();
+        post("/api/v1/auth/student/activate", Map.of("studentNo", "WS" + s, "name", "进行中申诉生",
+                "classCode", "WC" + s, "password", "Student12345"), null);
+        String stu = login("WS" + s, "Student12345");
+        String teacher = login("WT" + s, "Teacher12345");
+
+        // 会话保持 ACTIVE：本用例要证明「签到过程中」也能申诉
+        long sid = post("/api/v1/admin/sessions",
+                Map.of("classId", cid, "courseId", kid, "title", "进行中申诉签到", "durationMinutes", 30),
+                teacher).getBody().path("data").path("id").asLong();
+        jdbc.update("INSERT INTO face_profile (student_id, status, sample_count) VALUES (?, 'ACTIVE', 5)", stuId);
+
+        // 先确认正常情况下换得到票
+        assertThat(post("/api/v1/mobile/sessions/" + sid + "/join", null, stu)
+                .getStatusCode().value()).isEqualTo(200);
+
+        // 进行中提交申诉：没有 attendance 行也应成功（attendanceId=0）
+        ResponseEntity<JsonNode> created = post("/api/v1/mobile/appeals",
+                Map.of("sessionId", sid, "reason", "刷脸一直提示不匹配，我就在教室里"), stu);
+        assertThat(created.getStatusCode().value()).isEqualTo(200);
+        assertThat(created.getBody().path("data").path("status").asText()).isEqualTo("PENDING");
+
+        // ① join 拒绝，文案就是学生看到的那句
+        ResponseEntity<JsonNode> rejoin = post("/api/v1/mobile/sessions/" + sid + "/join", null, stu);
+        assertThat(rejoin.getStatusCode().value()).isEqualTo(409);
+        assertThat(code(rejoin)).isEqualTo("FA-5001");
+        assertThat(rejoin.getBody().path("message").asText()).isEqualTo("你已提交本次申诉");
+
+        // ② commit 兜底：先领过票、再在别处申诉的路径也堵上
+        ResponseEntity<JsonNode> commit = internalPost("/internal/checkin/commit",
+                Map.of("sessionId", sid, "studentId", stuId, "similarity", 0.91, "actionCount", 1));
+        assertThat(commit.getStatusCode().value()).isEqualTo(409);
+        assertThat(code(commit)).isEqualTo("FA-5001");
+
+        // ③ 首页列表带上申诉状态，前端据此把「待签到」改成「申诉中」
+        JsonNode mine = null;
+        for (JsonNode it : get("/api/v1/mobile/sessions/active", stu).getBody().path("data")) {
+            if (it.path("sessionId").asLong() == sid) {
+                mine = it;
+            }
+        }
+        assertThat(mine).as("进行中的场次仍应出现在列表里").isNotNull();
+        assertThat(mine.path("appealStatus").asText()).isEqualTo("PENDING");
     }
 }

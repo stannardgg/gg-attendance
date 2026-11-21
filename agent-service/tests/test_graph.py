@@ -129,3 +129,24 @@ def test_commit_expired_token_message(patch_graph, fake_tools, user):
     fake_tools.errors["create_session"] = ToolError("FA-6002", "令牌已过期", 400)
     out = session.resume(True)
     assert "过期" in out["answer"]
+
+
+def test_generic_class_rate_is_not_parsed_as_class_name(patch_graph, fake_tools, user):
+    """「本周各班出勤率」里的「本周各」不是班名。
+
+    旧行为：_CLASS_RATE 截出 cls="本周各" → 查不到 → 回「没有找到叫『本周各』的班级」，
+    正是管理端快捷问句被用户读成"模型没连上"的那一句。
+    """
+    out = _session(user).ask("本周各班出勤率是多少")
+
+    assert fake_tools.calls == []
+    assert "本周各" not in out["answer"]
+
+
+def test_class_rate_still_captures_specific_class():
+    from app.graph.nodes.planner import _CLASS_RATE, _clean
+
+    m = _CLASS_RATE.search("计算机 1 班这周出勤率是多少")
+    assert m is not None
+    assert _clean(m.group("cls")) == "计算机 1"
+    assert m.group("when") == "这周"

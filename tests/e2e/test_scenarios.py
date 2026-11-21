@@ -9,39 +9,23 @@
 """
 from __future__ import annotations
 
-import base64
 import datetime
-import hashlib
-import hmac
 import time
 
 import pytest
 
 import flows
 import synth
-from conftest import INTERNAL_TOKEN, QR_SECRET
+from conftest import INTERNAL_TOKEN
 from e2e_client import Client
 
 
 # ---------------------------------------------------------------- 工具
-def qr_token(secret: str, sid: int, epoch: int, ago_sec: int = 0) -> str:
-    """按 Java QrTokenService 的算法本地算一个时间片 token。
-
-    用它而不是"拿当前码再等 20 秒"，是因为服务端允许「当前 + 上一时间片」共 30 秒，
-    20 秒前的码不一定失效；这里直接算一个 45 秒前的片，确定性更强。
-    """
-    slice_no = int(time.time()) - ago_sec
-    slice_no //= 15
-    msg = f"{sid}|{epoch}|{slice_no}".encode()
-    digest = hmac.new(secret.encode(), msg, hashlib.sha256).digest()
-    return base64.b32encode(digest).decode()[:16]
-
-
-def do_checkin(world, key: str, sid: int, qr: str, *, action: str | None = None,
+def do_checkin(world, key: str, sid: int, *, action: str | None = None,
                opens: tuple[int, ...] = (1, 2, 4, 5), frames=None, baseline=None):
-    """扫码 → 拿票据 → 开始挑战 → 逐帧 → finish。返回 finish 的 data。"""
+    """进入签到 → 拿票据 → 开始挑战 → 逐帧 → finish。返回 finish 的 data。"""
     st = world.students[key]
-    j = flows.join(st["client"], sid, qr)
+    j = flows.join(st["client"], sid)
     assert j.status == 200, f"join 失败：{j.status} {j.body}"
     assert j.data["challengeRequired"] is True
     if frames is None:
@@ -69,7 +53,7 @@ def session_status(teacher: Client, sid: int) -> str:
 
 # ---------------------------------------------------------------- 场景
 def test_01_正常签到(world, events, facts):
-    """教师发起 → 学生扫码 → 人脸通过 → PRESENT；大屏 1 秒内 +1。"""
+    """教师发起 → 学生从首页进入 → 人脸通过 → PRESENT；大屏 1 秒内 +1。"""
     s = flows.start_session(world.teacher, world.class_id, world.course_id, "场景01")
     facts["s01"] = s["id"]
     assert s["expectedCount"] == 3, "应到名单应在创建时冻结为 3 人"
@@ -79,7 +63,7 @@ def test_01_正常签到(world, events, facts):
     live = events(s["id"], world.teacher.token)
     live.wait_for("EVT_CONNECTED", 2.0)
 
-    res = do_checkin(world, "s1", s["id"], s["qrToken"])
+    res = do_checkin(world, "s1", s["id"], action="MOUTH_TWICE")
     assert res.get("passed") is True, res
     assert res["attendanceStatus"] == "PRESENT", res
 
@@ -104,47 +88,38 @@ def test_02_迟到签到(world, facts):
                             late_after_sec=1)
     facts["s02"] = s["id"]
     time.sleep(2.2)
-    res = do_checkin(world, "s2", s["id"], s["qrToken"])
+    res = do_checkin(world, "s2", s["id"], action="MOUTH_TWICE")
     assert res.get("passed") is True, res
     assert res["attendanceStatus"] == "LATE"
 
 
-def test_03_过期二维码(world):
-    """过期码 → FA-3002；换码后的旧码同样失效。"""
-    assert QR_SECRET, "E2E_QR_SECRET 未注入，无法构造过期码"
+def test_03_会话结束后不可签到(world):
+    """学生从首页直接进入已结束的场次 → FA-3001；该场次也不再出现在进行中列表。"""
     s = flows.start_session(world.teacher, world.class_id, world.course_id, "场景03")
-    stale = qr_token(QR_SECRET, s["id"], s["epoch"], ago_sec=45)
-    r = flows.join(world.students["s3"]["client"], s["id"], stale)
-    assert r.status == 400 and r.code == "FA-3002", r.body
+    world.teacher.ok(f"/api/v1/admin/sessions/{s['id']}/close", {})
+    r = flows.join(world.students["s3"]["client"], s["id"])
+    assert r.status == 409 and r.code == "FA-3001", r.body
 
-    # 教师换码：换码**之前**拿到的 token 才是"旧码"。
-    # 注意 rotate-qr 的响应里已经带的是新码，拿它当旧码测等于测了个寂寞。
-    old = flows.refresh_qr(world.teacher, s["id"])
-    rotated = flows.rotate_qr(world.teacher, s["id"])
-    assert rotated["epoch"] == old["epoch"] + 1
-    r2 = flows.join(world.students["s3"]["client"], s["id"], old["qrToken"])
-    assert r2.status == 400 and r2.code == "FA-3002", r2.body
-    # 新码可用
-    assert flows.join(world.students["s3"]["client"], s["id"],
-                      rotated["qrToken"]).status == 200
+    active = world.students["s3"]["client"].ok("/api/v1/mobile/sessions/active", method="GET").data
+    assert s["id"] not in [int(x["sessionId"]) for x in active]
 
 
-def test_04_重复扫码(world, facts):
-    """同一学生第二次扫码 → FA-3003，且只留 1 条考勤。"""
+def test_04_重复签到(world, facts):
+    """同一学生第二次进入并提交 → FA-3003，且只留 1 条考勤。"""
     s = flows.start_session(world.teacher, world.class_id, world.course_id, "场景04")
     facts["s04"] = s["id"]
-    res = do_checkin(world, "s1", s["id"], s["qrToken"])
+    res = do_checkin(world, "s1", s["id"], action="MOUTH_TWICE")
     assert res.get("passed") is True, res
-    again = flows.join(world.students["s1"]["client"], s["id"], s["qrToken"])
+    again = flows.join(world.students["s1"]["client"], s["id"])
     # FA-3003 = 409 Conflict（已经签过，不是参数错）
     assert again.status == 409 and again.code == "FA-3003", again.body
     assert flows.attendance_of(world.students["s1"]["client"], s["id"]).status == 200
 
 
 def test_05_异班学生(world):
-    """别的班的学生扫码 → FA-3004。"""
+    """别的班的学生进入本场 → FA-3004。"""
     s = flows.start_session(world.teacher, world.class_id, world.course_id, "场景05")
-    r = flows.join(world.outsider["client"], s["id"], s["qrToken"])
+    r = flows.join(world.outsider["client"], s["id"])
     # 契约 error-codes.json：FA-3004 http=403（不是 400 —— 是"无权"，不是"参数错"）
     assert r.status == 403 and r.code == "FA-3004", r.body
     assert "班级" in r.message
@@ -154,7 +129,7 @@ def test_06_画面两人(world):
     """两人同框（都 ≥90px）→ FA-4002，且不产生考勤。"""
     s = flows.start_session(world.teacher, world.class_id, world.course_id, "场景06")
     st = world.students["s2"]
-    j = flows.join(st["client"], s["id"], s["qrToken"])
+    j = flows.join(st["client"], s["id"])
     assert j.status == 200, j.body
 
     face_a = synth.composite(world.students["s2"]["images"][0])
@@ -173,7 +148,7 @@ def test_08_要求两次只做一次(world):
     """MOUTH_TWICE 只张一次 → FA-4003，且回落「只检测到 1 次，要求 2 次」的数值。"""
     s = flows.start_session(world.teacher, world.class_id, world.course_id, "场景08")
     # 连张 2 帧才算「一次」（hold_frames=2）；只发 1 帧暗画面等于没张嘴
-    res = do_checkin(world, "s3", s["id"], s["qrToken"],
+    res = do_checkin(world, "s3", s["id"],
                      action="MOUTH_TWICE", opens=(2, 3))
     assert res["action"] == "MOUTH_TWICE"
     assert res["passed"] is False and res["rejectGate"] == "actionCount", res
@@ -185,7 +160,7 @@ def test_09_失败后申诉推送(world, events, facts):
     """签到失败 → 学生申诉 → 教师端 1 秒内收到提醒，申诉进列表。"""
     s = flows.start_session(world.teacher, world.class_id, world.course_id, "场景09")
     facts["s09"] = s["id"]
-    res = do_checkin(world, "s3", s["id"], s["qrToken"],
+    res = do_checkin(world, "s3", s["id"],
                      action="MOUTH_TWICE", opens=(2, 3))
     assert res["passed"] is False
 
@@ -282,7 +257,7 @@ def test_13_基线污染不误拒(world):
     opened = synth.open_mouth(base, bbox)
     # baseline = 张嘴（污染）；序列里两次张嘴各保持 2 帧（hold_frames=2）
     frames = [base, base, opened, opened, base, base, opened, opened]
-    res = do_checkin(world, "s2", s["id"], s["qrToken"], action="MOUTH_TWICE",
+    res = do_checkin(world, "s2", s["id"], action="MOUTH_TWICE",
                      frames=frames, baseline=opened)
     assert res.get("passed") is True, res
     assert res["detectedAction"] >= 2, res
@@ -296,7 +271,8 @@ def test_14_背景小脸不误拦(world):
     frame = synth.with_background_face(base, other, px=40)
     bbox = synth.largest_bbox(frame)
     frames = flows.frames_with_opens(frame, bbox, (1, 2, 4, 5), 8)
-    res = do_checkin(world, "s3", s["id"], s["qrToken"], frames=frames, baseline=frame)
+    res = do_checkin(world, "s3", s["id"], action="MOUTH_TWICE",
+                     frames=frames, baseline=frame)
     assert res.get("code") != "FA-4002", res
     assert res.get("passed") is True, res
 
@@ -395,7 +371,7 @@ def test_07_照片翻拍被拒(world):
     照片攻击探针（原始照片 100% / 全部 96%），那才是对活体模型本身的专项。
     """
     s = flows.start_session(world.teacher, world.class_id, world.course_id, "场景07")
-    res = do_checkin(world, "s1", s["id"], s["qrToken"], opens=())
+    res = do_checkin(world, "s1", s["id"], opens=())
     assert res.get("passed") is False, res
     assert res["rejectGate"], res          # 误拒必须可归因（§6.5），写清是哪道门禁拦的
     assert res["similarity"] is not None

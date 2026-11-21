@@ -19,7 +19,6 @@ log = logging.getLogger(__name__)
 _ACTION = [
     re.compile(r"(发起|开一?场?|开个).{0,12}签到"),
     re.compile(r"(结束|关闭|收尾).{0,6}签到"),
-    re.compile(r"(换码|换二维码|刷新二维码)"),
     re.compile(r"(补签|手工签到)"),
     re.compile(r"(标记|设为|改成).{0,6}(请假|免签)"),
     re.compile(r"(?<!待)(处理|通过|驳回).{0,4}申诉"),

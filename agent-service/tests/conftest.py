@@ -102,3 +102,23 @@ def patch_graph(monkeypatch, memory_graph, fake_catalog, fake_tools):
 @pytest.fixture
 def fake_tools() -> FakeTools:
     return FakeTools()
+
+
+@pytest.fixture(autouse=True)
+def _no_llm(monkeypatch):
+    """单测默认不起模型。
+
+    跑测试的机器上若有 LLM_API_KEY，`_polish` 会把模板文案重写一遍，
+    「已发起签到」这类断言就会随模型措辞漂移——本地全绿、CI 全红那种病。
+    需要真模型的用例自己把 settings 换回去。
+    """
+    import dataclasses
+
+    import app.graph.nodes.answer as answer_mod
+    import app.graph.nodes.planner as planner_mod
+    from app.config import settings
+
+    offline = dataclasses.replace(settings, llm_api_key="")
+    monkeypatch.setattr(planner_mod, "settings", offline)
+    monkeypatch.setattr(answer_mod, "settings", offline)
+    return offline

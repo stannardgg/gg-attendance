@@ -34,6 +34,8 @@ class Settings:
     llm_model: str
     llm_temperature: float
     llm_max_tokens: int
+    # 推理型模型（qwen3 系）先出 reasoning 再出正文，30s 容易在长 prompt 上截断成空回复
+    llm_timeout_sec: float
 
     # LangGraph
     checkpoint_url: str
@@ -70,7 +72,8 @@ def load_settings() -> Settings:
         llm_api_key=os.getenv("LLM_API_KEY", ""),
         llm_model=os.getenv("LLM_MODEL", ""),
         llm_temperature=float(os.getenv("LLM_TEMPERATURE", "0.2")),
-        llm_max_tokens=_int("LLM_MAX_TOKENS", 1024),
+        llm_max_tokens=_int("LLM_MAX_TOKENS", 2048),
+        llm_timeout_sec=float(os.getenv("LLM_TIMEOUT_SEC", "60")),
         checkpoint_url=os.getenv("REDIS_CHECKPOINT_URL", "redis://127.0.0.1:6379/2"),
         checkpoint_ttl_sec=_int("CHECKPOINT_TTL_SEC", 86400),
         recursion_limit=_int("GRAPH_RECURSION_LIMIT", 12),

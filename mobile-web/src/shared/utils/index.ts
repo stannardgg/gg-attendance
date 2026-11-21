@@ -16,8 +16,17 @@ export function mmss(sec: number): string {
   return `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`
 }
 
-/** 设备指纹：UA + 摄像头 deviceId 的弱哈希，只用于服务端风控归因，不上报硬件唯一标识。 */
-export function deviceHash(deviceId: string): string {
+/**
+ * canvas.toDataURL() 返回的是 "data:image/jpeg;base64,<payload>"，
+ * 而服务端（契约 face-api.yaml）要的是**纯 base64**。直接透传会让
+ * base64.b64decode(validate=True) 报 "Only base64 data is allowed"。
+ */
+export function stripDataUrl(dataUrl: string): string {
+  const comma = dataUrl.indexOf(',')
+  return comma >= 0 ? dataUrl.slice(comma + 1) : dataUrl
+}
+
+/** 设备指纹：UA + 摄像头 deviceId 的弱哈希，只用于服务端风控归因，不上报硬件唯一标识。 */export function deviceHash(deviceId: string): string {
   const raw = `${navigator.userAgent}|${deviceId}`
   let h1 = 0x811c9dc5
   let h2 = 0x01000193

@@ -73,24 +73,6 @@ async function close(row: SessionRow) {
   }
 }
 
-async function rotate(row: SessionRow) {
-  try {
-    await ElMessageBox.confirm(
-      '换码后旧二维码立即失效，大屏会在下一次刷新时显示新码。适合怀疑二维码被拍照外传时使用。',
-      '强制换码',
-      { type: 'warning' }
-    )
-  } catch {
-    return
-  }
-  try {
-    await api.post(`/api/v1/admin/sessions/${row.id}/rotate-qr`)
-    ElMessage.success('已换码，旧码失效')
-  } catch (err) {
-    ElMessage.error(messageOf(err))
-  }
-}
-
 async function exportXlsx(row: SessionRow) {
   try {
     const blob = await api.download('/api/v1/admin/attendance/export', { sessionId: row.id })
@@ -187,7 +169,6 @@ onMounted(() => {
           <template #default="{ row }">
             <el-button link type="primary" @click="router.push(`/sessions/${row.id}/live`)">大屏</el-button>
             <el-button link type="primary" @click="router.push(`/attendance?sessionId=${row.id}`)">名单</el-button>
-            <el-button v-if="row.status === 'ACTIVE'" link type="primary" @click="rotate(row)">换码</el-button>
             <el-button v-if="row.status === 'ACTIVE'" link type="warning" @click="close(row)">结束</el-button>
             <el-button link type="primary" @click="exportXlsx(row)">导出 Excel</el-button>
           </template>

@@ -61,7 +61,7 @@ public class WriteTools {
     }
 
     public List<ToolSpec> specs() {
-        return List.of(createSession(), closeSession(), rotateQr(),
+        return List.of(createSession(), closeSession(),
                 manualCheckin(), markLeave(), markExempt(), handleAppeal(),
                 createClass(), updateClass(), archiveClass(),
                 createCourse(), updateCourse(), archiveCourse(),
@@ -208,52 +208,6 @@ public class WriteTools {
                             UPDATE checkin_session SET status = 'ACTIVE', closed_at = NULL
                             WHERE id = ? AND status = 'CLOSED'
                             """, sessionId);
-                })
-                .build();
-    }
-
-    // ============================ rotate_qr ============================
-
-    private ToolSpec rotateQr() {
-        Map<String, Object> schema = ToolSpec.object(Map.of("sessionId", ToolSpec.int64("会话")),
-                List.of("sessionId"));
-        return ToolSpec.builder("rotate_qr", "L2", "强制换码")
-                .description("让当前二维码立即失效并生成新码。")
-                .undoable("撤销会把码版本回退一级，旧码重新可用")
-                .params(schema)
-                .returns(Map.of("type", "object"))
-                .plan((ctx, raw) -> {
-                    Params p = Params.of(raw, schema);
-                    long sessionId = p.requireLng("sessionId");
-                    Map<String, Object> s = queries.requireSession(ctx, sessionId);
-                    if (!"ACTIVE".equals(s.get("status"))) {
-                        throw new BizException(ErrorCode.SESSION_CLOSED, "会话已结束，不能换码");
-                    }
-                    Integer epoch = jdbc.queryForObject(
-                            "SELECT qr_epoch FROM checkin_session WHERE id = ?", Integer.class, sessionId);
-                    AgentDtos.Preview preview = new AgentDtos.Preview(
-                            "强制更换签到二维码",
-                            s.get("className") + " × " + s.get("courseName"),
-                            1,
-                            "学生手里的旧码将立即失效，需要重新扫码",
-                            List.of(new AgentDtos.FieldDiff("qrEpoch", "二维码版本",
-                                    String.valueOf(epoch), String.valueOf((epoch == null ? 0 : epoch) + 1))),
-                            true, null, null);
-                    return new ToolSpec.Plan(preview, Map.of("qrEpoch", epoch == null ? 0 : epoch));
-                })
-                .exec((ctx, raw) -> {
-                    Params p = Params.of(raw, schema);
-                    CheckinDtos.QrData qr = sessionService.rotateQr(p.requireLng("sessionId"));
-                    Map<String, Object> data = new LinkedHashMap<>();
-                    data.put("sessionId", qr.sessionId());
-                    data.put("qrEpoch", qr.qrEpoch());
-                    data.put("expiresAt", qr.expiresAt());
-                    return AgentDtos.ToolResult.single(data);
-                })
-                .undo((ctx, params, before, after) -> {
-                    long sessionId = ((Number) params.get("sessionId")).longValue();
-                    int epoch = before == null ? 0 : before.path("qrEpoch").asInt(0);
-                    jdbc.update("UPDATE checkin_session SET qr_epoch = ? WHERE id = ?", epoch, sessionId);
                 })
                 .build();
     }

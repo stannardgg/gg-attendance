@@ -74,8 +74,17 @@ def liveness() -> LivenessModel:
 
 
 def decode_b64_jpeg(data_b64: str) -> np.ndarray:
-    """Base64 JPEG → BGR ndarray。失败抛 ValueError（→ 400）。"""
+    """Base64 JPEG → BGR ndarray。失败抛 ValueError（→ 400）。
+
+    兼容浏览器 `canvas.toDataURL()` 的 "data:image/jpeg;base64,..." 形式：
+    契约（face-api.yaml）要求纯 base64，但移动端曾把整串 data URL 直接传上来，
+    `b64decode(validate=True)` 会因 ':' ';' ',' 报 "Only base64 data is allowed"。
+    这里多剥一次前缀，避免解码层成为整条签到链路的单点故障。
+    """
     import base64
+    if data_b64.startswith("data:"):
+        _, _, data_b64 = data_b64.partition(",")
+    data_b64 = data_b64.strip()
     try:
         raw = base64.b64decode(data_b64, validate=True)
     except Exception as exc:

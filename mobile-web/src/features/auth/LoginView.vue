@@ -45,7 +45,7 @@ async function submit() {
   <div class="page login">
     <div class="brand">
       <h1>人脸签到</h1>
-      <p class="muted">用学号登录，扫码完成签到</p>
+      <p class="muted">用学号登录，进入进行中的签到并刷脸</p>
     </div>
 
     <van-notice-bar
@@ -76,9 +76,17 @@ async function submit() {
         />
       </van-cell-group>
       <div style="margin: 20px 16px">
-        <van-button round block type="primary" native-type="submit" :loading="loading" :disabled="wechat">
-          登录
-        </van-button>
+      <!-- 微信内允许登录：登录、通知、申诉不依赖摄像头，签到时会被采集页硬拦。
+           此处禁用过登录按钮，学生扫码进来直接卡死（按钮灰的没解释），已移除。 -->
+      <van-button
+        round
+        block
+        type="primary"
+        native-type="submit"
+        :loading="loading"
+      >
+        登录
+      </van-button>
       </div>
     </van-form>
 
