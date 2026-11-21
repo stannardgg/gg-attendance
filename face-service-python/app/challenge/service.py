@@ -287,6 +287,7 @@ class ChallengeService:
             "baselineDegraded": st.baseline_degraded,
             "attendanceStatus": None,
             "attendanceId": None,
+            "checkinAt": None,
         }
 
         # 门禁全过才落库。落库失败必须让学生看到，不能"假成功"。
@@ -304,6 +305,11 @@ class ChallengeService:
                 )
                 result["attendanceStatus"] = committed.get("status")
                 result["attendanceId"] = committed.get("attendanceId")
+                # 成功页要显示签到时间：契约 FinishData.checkinAt 早就声明了该字段，
+                # 以前只挑出 status/id，前端只能显示 "—"，只能退化成设备本地时间。
+                # 姓名不在这里透传：学生看自己的结果，前端用登录态里的 name 即可，
+                # 少一个 PII 字段过网络。
+                result["checkinAt"] = committed.get("checkinAt")
             except java_client.JavaError as exc:
                 if exc.code == "FA-3003":
                     # 已签到：网络重试导致的重复提交，按成功处理
