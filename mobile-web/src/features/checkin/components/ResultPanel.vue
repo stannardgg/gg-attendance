@@ -4,7 +4,7 @@
  * 失败必须给"下一步"：是重试还是申诉，不能只写"签到失败"（§7.3）。
  * 门禁明细默认折叠 —— 学生不需要看阈值，但老师问「为什么失败」时要能翻出来。
  */
-import { computed } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { GATE_ADVICE, GATE_LABEL } from '@/shared/api/errors'
 import type { FinishData } from '@/shared/api/types'
 
@@ -14,6 +14,8 @@ const props = defineProps<{
   errorText?: string
   className?: string
   courseName?: string
+  /** 当前登录学生的姓名。学生看自己的签到结果，姓名取自登录态，不额外请求。 */
+  studentName?: string
   attempts: number
   canAppeal: boolean
 }>()
@@ -28,6 +30,39 @@ const advice = computed(() =>
 )
 /** 失败 3 次后隐藏重试，只留申诉（§7.4） */
 const canRetry = computed(() => !passed.value && props.attempts < 3)
+
+/**
+ * 成功页的时间以服务端 `checkinAt` 为准（契约 FinishData.checkinAt）。
+ * 旧版人脸服务不回这个字段时退回「首次看到成功结果」的本机时间——仅用于展示，
+ * 不参与任何判定；权威记录始终是 attendance.checkin_at。
+ */
+const localCheckinAt = ref('')
+watch(
+  () => props.finish?.passed,
+  (ok) => {
+    if (!ok) {
+      // 重试会把 finish 置空，不清掉的话下一次成功仍显示上一轮的时间
+      localCheckinAt.value = ''
+      return
+    }
+    if (!localCheckinAt.value && !props.finish?.checkinAt) {
+      localCheckinAt.value = formatTime(new Date())
+    }
+  },
+  { immediate: true }
+)
+
+const checkinAtText = computed(() => {
+  const raw = props.finish?.checkinAt
+  if (raw) return raw.replace('T', ' ').slice(0, 19)
+  return localCheckinAt.value || '—'
+})
+
+function formatTime(d: Date): string {
+  const p = (n: number) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} `
+    + `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`
+}
 
 const gateRows = computed(() => {
   const g = props.finish?.gates
@@ -67,13 +102,9 @@ const gateRows = computed(() => {
         {{ className }} · {{ courseName }}
       </p>
       <van-cell-group inset style="margin-top: 18px; text-align: left">
+        <van-cell v-if="studentName" title="姓名" :value="studentName" />
         <van-cell title="状态" :value="finish?.status === 'LATE' ? '迟到' : '已签到'" />
-        <van-cell title="时间" :value="(finish?.checkinAt || '').replace('T', ' ').slice(0, 19) || '—'" />
-        <van-cell
-          v-if="finish?.similarity != null"
-          title="比对相似度"
-          :value="finish.similarity.toFixed(3)"
-        />
+        <van-cell title="时间" :value="checkinAtText" />
         <van-cell v-if="finish?.baselineDegraded" title="基线帧" value="已降级（不影响结果）" />
       </van-cell-group>
       <div style="margin-top: 22px">

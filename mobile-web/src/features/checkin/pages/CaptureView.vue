@@ -20,6 +20,7 @@ import ActionPrompt from '../components/ActionPrompt.vue'
 import FaceGuideOverlay from '../components/FaceGuideOverlay.vue'
 import ResultPanel from '../components/ResultPanel.vue'
 import { checkin, clearJoin, restoreJoin } from '../store'
+import { auth } from '@/shared/store/auth'
 import { deviceHash, isSecureContextOk, isWeChat } from '@/shared/utils'
 import WeChatGuard from '@/shared/components/WeChatGuard.vue'
 
@@ -353,6 +354,7 @@ onBeforeUnmount(() => {
         :error-text="errorText"
         :class-name="checkin.className"
         :course-name="checkin.courseName"
+        :student-name="auth.profile?.name"
         :attempts="attempts"
         :can-appeal="true"
         @retry="retry"

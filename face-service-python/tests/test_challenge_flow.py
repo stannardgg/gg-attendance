@@ -79,18 +79,25 @@ def test_static_sequence_fails(service, face_img):
     assert "match" in result["gates"]
 
 
-def test_out_of_order_frame_dropped(service, face_img):
+def test_stale_frame_dropped_gap_tolerated(service, face_img):
+    """序号倒退丢弃、序号跳跃容忍——v1.3 起两个方向必须同时成立。
+
+    旧版把两者一律当作"乱序"永久拒收，`st.seq` 会卡在缺口处，整场剩下的
+    窗口全废（前端只看到"识别失败"，网关日志一片 200）。这条用例钉住两个
+    方向，防止以后再把缺口当乱序处理。
+    """
     ticket = tickets.issue(1, 102, "jti-ooo")
     info = service.start(ticket, composite(face_img))
     cid = info["challengeId"]
 
-    service.frame(cid, composite(face_img), seq=0)
-    resp = service.frame(cid, composite(face_img), seq=5)   # 乱序
-    assert resp["accepted"] is False
-    resp2 = service.frame(cid, composite(face_img), seq=1)  # 正序
-    assert resp2["accepted"] is True
+    service.frame(cid, composite(face_img), seq=0)            # st.seq -> 1
+    stale = service.frame(cid, composite(face_img), seq=0)    # 重传的旧帧
+    assert stale["accepted"] is False
+
+    gap = service.frame(cid, composite(face_img), seq=5)      # 缺口，按降采样
+    assert gap["accepted"] is True
     # seq 字段返回的是"下一帧应传的序号"（本帧已被消费，计数器 +1）
-    assert resp2["seq"] == 2
+    assert gap["seq"] == 6
 
 
 def test_no_face_abort(service, face_img):

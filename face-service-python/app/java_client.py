@@ -52,7 +52,11 @@ def _call(path: str, body: dict, timeout: float = 8.0) -> dict:
 def commit_checkin(session_id: int, student_id: int, similarity: float,
                    liveness_median: float | None, identity_sim: float | None,
                    action_count: int, action_seq: str) -> dict:
-    """提交签到结果。返回 {attendanceId, status, checkinAt}。"""
+    """提交签到结果。返回 {attendanceId, status, checkinAt, studentName}。
+
+    checkinAt 由 Java 侧写入（attendance.checkin_at），finish 结果原样透传给前端；
+    没有它，成功页只能显示设备本地时间或 "—"。
+    """
     return _call("/internal/checkin/commit", {
         "sessionId": session_id,
         "studentId": student_id,
