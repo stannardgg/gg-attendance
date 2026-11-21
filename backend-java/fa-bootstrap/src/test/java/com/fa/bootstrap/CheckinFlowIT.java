@@ -107,8 +107,11 @@ class CheckinFlowIT extends ItBase {
         assertThat(code(noFace)).isEqualTo("FA-4006");
 
         // 人脸档案 ACTIVE 后才放行（本 IT 不跑真实采集，直接置状态）
-        jdbc.update("INSERT INTO face_profile (student_id, status, sample_count) "
-                + "VALUES (?, 'ACTIVE', 5)", s1);
+        // 注意：建学生时 StudentService 已自动插入 face_profile 行，这里只能 UPDATE，
+        // 再 INSERT 会撞 uk_face_profile_student（CI 上踩过）。
+        int touched = jdbc.update("UPDATE face_profile SET status = 'ACTIVE', sample_count = 5 "
+                + "WHERE student_id = ?", s1);
+        assertThat(touched).as("学生创建时应已存在 face_profile 行").isEqualTo(1);
 
         // 学生 join：无请求体、无 token，身份完全来自 JWT
         ResponseEntity<JsonNode> join = post("/api/v1/mobile/sessions/" + sid + "/join", null, stu);
@@ -231,7 +234,9 @@ class CheckinFlowIT extends ItBase {
         long sid = post("/api/v1/admin/sessions",
                 Map.of("classId", cid, "courseId", kid, "title", "进行中申诉签到", "durationMinutes", 30),
                 teacher).getBody().path("data").path("id").asLong();
-        jdbc.update("INSERT INTO face_profile (student_id, status, sample_count) VALUES (?, 'ACTIVE', 5)", stuId);
+        assertThat(jdbc.update("UPDATE face_profile SET status = 'ACTIVE', sample_count = 5 "
+                        + "WHERE student_id = ?", stuId))
+                .as("学生创建时应已存在 face_profile 行").isEqualTo(1);
 
         // 先确认正常情况下换得到票
         assertThat(post("/api/v1/mobile/sessions/" + sid + "/join", null, stu)
