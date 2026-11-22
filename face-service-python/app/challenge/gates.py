@@ -7,6 +7,7 @@ match 门禁（1:N）依赖向量库，向量来源见 index/vectors.py 的说�
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 
 import numpy as np
@@ -17,6 +18,10 @@ from app.challenge.store import (
 )
 from app.config import settings
 from app.engine.landmark import cosine_similarity
+
+# 用业务 logger（main.py 给它配了 handler 并设成 INFO）。用 __name__ 会被 root
+# 的默认 WARNING 吃掉——判定明细等于没记。
+logger = logging.getLogger("face-service")
 
 
 @dataclass
@@ -73,6 +78,10 @@ def gate_action(st: ChallengeState) -> tuple[GateResult, int, int]:
         for y in st.yaws:
             counter.observe(y)
         detected, _ = counter.result()
+        if detected < st.need:
+            # 同闭眼：判失败才记逐帧偏航，供误拒归因
+            logger.info("转头未计数 base=%.3f yaws=%s",
+                        st.baseline_yaw, [round(x, 3) for x in st.yaws])
         return (GateResult(detected >= st.need, float(detected), float(st.need)),
                 detected, st.need)
 
@@ -89,6 +98,11 @@ def gate_action(st: ChallengeState) -> tuple[GateResult, int, int]:
         for e in st.eyes:
             counter.observe(e)
         detected, _ = counter.result()
+        if detected < st.need:
+            # 只在判失败时打逐帧值：误拒申诉要能回答"差多少、哪一帧没跟上"，
+            # 成功路径没必要刷屏（finish 那行已有 actionCount）。
+            logger.info("闭眼未计数 base=%.3f ratios=%s",
+                        st.baseline_eye, [round(x, 3) for x in st.eyes])
         return (GateResult(detected >= st.need, float(detected), float(st.need)),
                 detected, st.need)
 

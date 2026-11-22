@@ -296,8 +296,13 @@ def rotate_about(frame: np.ndarray, center: tuple[float, float], deg: float) -> 
     return cv2.warpAffine(canvas, m, (diag, diag), borderMode=cv2.BORDER_REPLICATE)
 
 
-def run_eye(n: int = 80) -> int:
-    """闭眼判据的分离度：睁眼 vs 肤色覆盖眼睑，外加静止抖动噪声。"""
+def run_eye(n: int = 80, wire: bool = False) -> int:
+    """闭眼判据的分离度：睁眼 vs 肤色覆盖眼睑，外加静止抖动噪声。
+
+    `wire=True` 会把素材过一遍上传编码（JPEG q90 编解码）再量：服务端看到的
+    是压缩后的帧，而压缩会抹平肤色块与睫毛线，降幅普遍小 0.01~0.02。
+    E2E 的身份预检必须按这个口径筛——否则会出现"原始帧刚好过线、线上刚好不过"。
+    """
     from app.challenge.action import EyeCloseCounter, eye_dark_ratio
 
     synth = _e2e_synth()
@@ -311,18 +316,25 @@ def run_eye(n: int = 80) -> int:
         gray = cv2.cvtColor(lm.align_space(fr, fc.bbox), cv2.COLOR_BGR2GRAY)
         return eye_dark_ratio(gray, rois)
 
+    def upload(fr):
+        if not wire:
+            return fr
+        ok, enc = cv2.imencode(".jpg", fr, [cv2.IMWRITE_JPEG_QUALITY, 90])
+        return cv2.imdecode(enc, cv2.IMREAD_COLOR) if ok else fr
+
     rows = []
     for s in _subjects(n):
         img = cv2.imread(os.path.join(CASIA, s, f"{s}_0.jpg"))
         if img is None:
             continue
         frame = synth.composite(img)
+        shut = synth.close_eyes(frame)                   # 先在原始帧上涂，再编码（与 E2E 同序）
+        frame, shut = upload(frame), upload(shut)
         face, _ = synth.largest_face(frame)
         if face is None:
             continue
         pts, _ = lm.landmarks(frame, face.bbox)
         locked = lm.eye_rects(pts)                       # 基线帧锁定，后续帧复用
-        shut = synth.close_eyes(frame)
         shut_face, _ = synth.largest_face(shut)
         if shut_face is None:
             continue
@@ -361,10 +373,14 @@ def run_eye(n: int = 80) -> int:
 
     drop = settings.action.eye_dark_drop
     sep = drop / std if std > 0 else float("inf")
+    print(f"口径：{'上传（JPEG q90 编解码）' if wire else '原始帧（加 --wire 量上传口径）'}")
     print(f"样本 {len(rows)}；睁眼 mean={opened.mean():.3f} std={opened.std():.3f}"
           f"；闭眼 mean={closed.mean():.3f}")
     print(f"逐人降幅 mean={drops.mean():.3f} std={drops.std():.3f} min={drops.min():+.3f}"
           f"；降幅 ≥ {drop:.2f} 的比例 {(drops >= drop).sum()}/{len(drops)}")
+    bad = [s for s, o, c in rows if o - c < drop or c > o * settings.action.eye_drop_ratio]
+    if bad:
+        print(f"  判不出的身份（预检应剔除）：{', '.join(bad)}")
     print(f"静止噪声 std={std:.4f}（{len(noise)} 帧，抖动±4px + JPEG q60 + 亮度±5%）")
     print(f"分离度：abs_drop / std = {drop:.2f} / {std:.4f} = {sep:.1f}σ"
           f"（§4.4.1 要求 ≥3σ）{'✓' if sep >= 3 else '✗'}")
@@ -451,6 +467,8 @@ def main() -> int:
                         help="实测尺度类动作（靠近/离远）的分离度")
     parser.add_argument("--eye", action="store_true",
                         help="实测闭眼判据（眼框暗度）的分离度")
+    parser.add_argument("--wire", action="store_true",
+                        help="把素材过一遍上传编码（JPEG q90）再量；E2E 预检按此口径")
     parser.add_argument("--pose", action="store_true",
                         help="实测转头判据（5 点偏航代理）的噪声与滚转不变性")
     parser.add_argument("--face", default=None, help="合成模式用的人脸图")
@@ -461,7 +479,7 @@ def main() -> int:
     if args.scale:
         return run_scale(args.face or os.path.join(CASIA, "000", "000_0.jpg"))
     if args.eye:
-        return run_eye()
+        return run_eye(wire=args.wire)
     if args.pose:
         return run_pose()
 
