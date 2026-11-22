@@ -1,6 +1,7 @@
 package com.fa.checkin.api;
 
 import com.fa.checkin.api.dto.CheckinDtos;
+import com.fa.checkin.app.CheckinAttemptService;
 import com.fa.checkin.app.CheckinService;
 import com.fa.checkin.app.CheckinTicketService;
 import com.fa.checkin.app.SessionService;
@@ -48,18 +49,20 @@ public class MobileCheckinController {
     private final AttendanceMapper attendanceMapper;
     private final CheckinTicketService tickets;
     private final CheckinService checkinService;
+    private final CheckinAttemptService attempts;
     private final NameLookup nameLookup;
     private final JdbcTemplate jdbc;
 
     public MobileCheckinController(SessionService sessionService, SessionMapper sessionMapper,
                                    AttendanceMapper attendanceMapper, CheckinTicketService tickets,
-                                   CheckinService checkinService, NameLookup nameLookup,
-                                   JdbcTemplate jdbc) {
+                                   CheckinService checkinService, CheckinAttemptService attempts,
+                                   NameLookup nameLookup, JdbcTemplate jdbc) {
         this.sessionService = sessionService;
         this.sessionMapper = sessionMapper;
         this.attendanceMapper = attendanceMapper;
         this.tickets = tickets;
         this.checkinService = checkinService;
+        this.attempts = attempts;
         this.nameLookup = nameLookup;
         this.jdbc = jdbc;
     }
@@ -112,16 +115,28 @@ public class MobileCheckinController {
         // 首页据此把「待签到」改成「申诉中」并禁止再进采集页 —— 只靠 join 报错的话，
         // 学生看到的是「待签到」标签点进去才被拒，等于把结果藏在一次多余点击后面。
         Map<Long, String> myAppeal = new HashMap<>();
-        List<Object> appealArgs = new ArrayList<>();
-        appealArgs.add(user.studentId());
-        list.forEach(s -> appealArgs.add(s.getId()));
+        // (studentId, sid1, sid2, ...) 这组参数申诉查询和失败计数查询共用
+        List<Object> keyedArgs = new ArrayList<>();
+        keyedArgs.add(user.studentId());
+        list.forEach(s -> keyedArgs.add(s.getId()));
         jdbc.query("select a.session_id, a.status from appeal a "
                         + "join (select max(id) as id from appeal where student_id = ? "
                         + "and session_id in (" + placeholders + ") group by session_id) x on x.id = a.id",
                 rs -> {
                     myAppeal.put(rs.getLong("session_id"), rs.getString("status"));
                 },
-                appealArgs.toArray());
+                keyedArgs.toArray());
+
+        // 刷脸失败计数（CR-023）：首页据此把「待签到」改成「识别失败」并拒绝点击，
+        // 与 join 的 FA-3005 形成前后两道 —— 与申诉状态同样的理由，结果不能藏在
+        // 一次多余点击后面。没失败过的场次不在表里，按 0 处理。
+        Map<Long, Integer> failCounts = new HashMap<>();
+        jdbc.query("select session_id, fail_count from checkin_attempt "
+                        + "where student_id = ? and session_id in (" + placeholders + ")",
+                rs -> {
+                    failCounts.put(rs.getLong("session_id"), rs.getInt("fail_count"));
+                },
+                keyedArgs.toArray());
 
         var cls = nameLookup.classNames(list.stream().map(CheckinSession::getClassId).distinct().toList());
         var crs = nameLookup.courseNames(list.stream().map(CheckinSession::getCourseId).distinct().toList());
@@ -130,7 +145,9 @@ public class MobileCheckinController {
                         s.getId(), s.getTitle(), cls.get(s.getClassId()), crs.get(s.getCourseId()),
                         s.getStartAt(), s.getEndAt(), sessionService.remainingSeconds(s),
                         myStatus.getOrDefault(s.getId(), "NOT_STARTED"),
-                        myAppeal.get(s.getId())))
+                        myAppeal.get(s.getId()),
+                        Math.max(0, attempts.maxRetry()
+                                - failCounts.getOrDefault(s.getId(), 0))))
                 .toList();
         return Result.ok(resp);
     }
@@ -138,8 +155,8 @@ public class MobileCheckinController {
     /**
      * 进入签到并领取票据。
      *
-     * <p>无请求体：学生身份来自 JWT，会话来自路径参数。五道便宜的前置检查
-     * 全部保留，只是把「二维码是否有效」换成了「人脸档案是否可用」。
+     * <p>无请求体：学生身份来自 JWT，会话来自路径参数。六道便宜的前置检查：
+     * 会话窗口、应到名单、已签到、待处理申诉、识别失败上限（CR-023）、人脸档案可用。
      * 其中「已提交待处理申诉」与「已签到」同级互斥：两者都意味着这场不需要再刷脸。
      */
     @PostMapping("/sessions/{sid}/join")
@@ -172,6 +189,13 @@ public class MobileCheckinController {
         if (pendingAppeal != null && pendingAppeal > 0) {
             throw new BizException(ErrorCode.APPEAL_EXISTS, "你已提交本次申诉");
         }
+        // 识别失败已达上限（CR-023）：采集页的结果面板只是隐藏了重试按钮，
+        // 那是 UI 约定；这里是权威判定——关掉页面再回来、或者直接打接口，
+        // 都不能绕过「三次失败后本场锁死」。查库一行，代价可忽略。
+        CheckinDtos.AttemptData attempt = attempts.status(sid, user.studentId());
+        if (attempt.blocked()) {
+            throw new BizException(ErrorCode.RETRY_EXCEEDED, "识别失败次数已达上限，请提交申诉让老师核对");
+        }
         Long faceActive = jdbc.queryForObject(
                 "select count(*) from face_profile where student_id = ? and status = 'ACTIVE'",
                 Long.class, user.studentId());
@@ -185,7 +209,7 @@ public class MobileCheckinController {
         return Result.ok(new CheckinDtos.JoinData(
                 tickets.issue(sid, user.studentId()), tickets.ttl(),
                 cls.get(s.getClassId()), crs.get(s.getCourseId()), s.getTitle(),
-                sessionService.remainingSeconds(s), true, 3));
+                sessionService.remainingSeconds(s), true, attempt.retryLeft()));
     }
 
     /**

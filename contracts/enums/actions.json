@@ -1,6 +1,6 @@
 {
   "$comment": "动作可测性白名单。新增动作前必须先跑 scripts/probe_action.py 量出分离度 ≥3 倍标准差，否则不得上线。停用动作留在 disabled 里备查，不进 actions。",
-  "version": "1.3.0",
+  "version": "1.3.1",
   "frozen": true,
   "actions": [
     {
@@ -48,25 +48,25 @@
       "criterion": {
         "metric": "eye_dark_ratio",
         "base": "基线帧眼框暗像素占比均值（两眼）",
-        "segmentMinFrames": 2,
+        "segmentMinFrames": 1,
         "delta": 0.06,
         "dropRatio": 0.6,
         "direction": "close"
       },
-      "note": "CR-021。这不是「眨眼」而是「闭眼保持」：4fps 采样抓不住 100~300ms 的眨眼（采样定理问题），改成闭住约 1 秒后同一套眼区判据可稳定检出。基线眼区暗度 <0.10 或瞳距 <45px 时不参与随机"
+      "note": "CR-021。这不是「眨眼」而是「闭眼保持」：4fps 采样抓不住 100~300ms 的眨眼（采样定理问题），改成闭住约 1 秒后同一套眼区判据可稳定检出。基线眼区暗度 <0.10 或瞳距 <45px 时不参与随机。1.3.1：segmentMinFrames 2→1——真机有效采样仅 ~1.25fps（服务端单帧 ~800ms），1 秒动作只有 1~2 帧落窗，hold=2 时按文案做也判不过；单帧阈值 3.9σ，误判率 ~5e-5"
     },
     {
       "code": "TURN_LEFT",
       "label": "向左转头",
-      "instruction": "请把头慢慢转向你的左边，约 25 度，保持半秒",
+      "instruction": "请把头慢慢转向你的左边，约 25 度，保持约 1 秒",
       "need": 1,
-      "windowMs": 2500,
+      "windowMs": 3000,
       "minFrames": 8,
       "enabled": true,
       "criterion": {
         "metric": "yaw_proxy",
         "base": "基线帧 (鼻尖-双眼中点)·眼轴 / 瞳距",
-        "segmentMinFrames": 2,
+        "segmentMinFrames": 1,
         "delta": 0.12,
         "direction": "left"
       },
@@ -75,15 +75,15 @@
     {
       "code": "TURN_RIGHT",
       "label": "向右转头",
-      "instruction": "请把头慢慢转向你的右边，约 25 度，保持半秒",
+      "instruction": "请把头慢慢转向你的右边，约 25 度，保持约 1 秒",
       "need": 1,
-      "windowMs": 2500,
+      "windowMs": 3000,
       "minFrames": 8,
       "enabled": true,
       "criterion": {
         "metric": "yaw_proxy",
         "base": "基线帧 (鼻尖-双眼中点)·眼轴 / 瞳距",
-        "segmentMinFrames": 2,
+        "segmentMinFrames": 1,
         "delta": 0.12,
         "direction": "right"
       },

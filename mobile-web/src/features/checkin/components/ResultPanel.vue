@@ -18,6 +18,10 @@ const props = defineProps<{
   studentName?: string
   attempts: number
   canAppeal: boolean
+  /** 服务端权威剩余次数（CR-023）。0 = 失败达上限，隐藏重试只留申诉。 */
+  retryLeft?: number | null
+  /** start 阶段就被 FA-3005 拒（旧票据偷跑）时置 true，与 retryLeft 二选一或同时生效 */
+  retryBlocked?: boolean
 }>()
 
 const emit = defineEmits<{ (e: 'retry'): void; (e: 'appeal'): void }>()
@@ -28,8 +32,17 @@ const gateTitle = computed(() => (gateKey.value ? GATE_LABEL[gateKey.value] || '
 const advice = computed(() =>
   gateKey.value ? GATE_ADVICE[gateKey.value] || '请调整后重试，或提交申诉。' : '请重试，或提交申诉。'
 )
-/** 失败 3 次后隐藏重试，只留申诉（§7.4） */
-const canRetry = computed(() => !passed.value && props.attempts < 3)
+/**
+ * 重试按钮的显隐：本地 attempts 只是展示兜底（刷新页面就清零，门禁不能靠它），
+ * 服务端 retryLeft / FA-3005 才是权威（CR-023）。两个条件任一命中即隐藏。
+ */
+const canRetry = computed(
+  () =>
+    !passed.value &&
+    props.attempts < 3 &&
+    !props.retryBlocked &&
+    !(props.retryLeft != null && props.retryLeft <= 0)
+)
 
 /**
  * 成功页的时间以服务端 `checkinAt` 为准（契约 FinishData.checkinAt）。
@@ -154,7 +167,7 @@ const gateRows = computed(() => {
           本次签到的申诉入口未开启。请联系任课老师说明情况。
         </p>
         <p v-if="!canRetry && canAppeal" class="muted" style="margin-top: 10px">
-          已经试过 3 次，请提交申诉让老师人工核对。
+          识别失败次数已达上限，本场不能再刷脸。请提交申诉，由老师人工核对。
         </p>
       </div>
     </template>

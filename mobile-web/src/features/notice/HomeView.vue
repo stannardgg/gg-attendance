@@ -51,22 +51,33 @@ function go(s: ActiveSession) {
     showToast('这场你已经签过了')
     return
   }
+  // 识别失败已达上限（CR-023）：签到这条路已经锁死（join 会以 FA-3005 拒绝），
+  // 首页不能还把学生往采集页送。此时该场次唯一有意义的动作是申诉，
+  // 所以点击直接带去申诉页——不是「禁入」，是换一条唯一的正路。
+  if ((s.retryLeft ?? 3) <= 0) {
+    showToast({ message: '识别失败次数已达上限，请提交申诉让老师核对', duration: 2200 })
+    router.push(`/appeal/${s.sessionId}`)
+    return
+  }
   // 取消二维码后不再要求扫码：直接带 sid 进入签到入口，由入口页换票据
   router.push({ path: '/checkin', query: { sid: String(s.sessionId) } })
 }
 
-/** 申诉中优先于签到状态：有在办申诉时不能还写「待签到」 */
+/** 申诉中优先于签到状态，失败达上限次之：标签不能与真实可做的事矛盾 */
 function tagText(s: ActiveSession) {
   if (s.appealStatus === 'PENDING') return '申诉中'
   if (s.myStatus === 'PRESENT') return '已签到'
   if (s.myStatus === 'LATE') return '迟到'
+  if ((s.retryLeft ?? 3) <= 0) return '识别失败'
   if (s.myStatus === 'IN_PROGRESS') return '进行中'
   return '待签到'
 }
 
-function tagType(s: ActiveSession): 'primary' | 'success' | 'warning' {
+function tagType(s: ActiveSession): 'primary' | 'success' | 'warning' | 'danger' {
   if (s.appealStatus === 'PENDING') return 'warning'
-  return s.myStatus === 'PRESENT' || s.myStatus === 'LATE' ? 'success' : 'primary'
+  if (s.myStatus === 'PRESENT' || s.myStatus === 'LATE') return 'success'
+  if ((s.retryLeft ?? 3) <= 0) return 'danger'
+  return 'primary'
 }
 
 onMounted(() => {

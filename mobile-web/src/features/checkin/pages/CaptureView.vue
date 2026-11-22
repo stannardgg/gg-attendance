@@ -65,6 +65,7 @@ const {
   droppedFrames,
   errorText,
   blockedGate,
+  retryBlocked,
   finish,
   paused,
   begin,
@@ -357,6 +358,8 @@ onBeforeUnmount(() => {
         :student-name="auth.profile?.name"
         :attempts="attempts"
         :can-appeal="true"
+        :retry-left="finish?.retryLeft"
+        :retry-blocked="retryBlocked"
         @retry="retry"
         @appeal="goAppeal"
       />

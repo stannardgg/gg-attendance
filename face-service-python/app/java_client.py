@@ -1,14 +1,19 @@
-"""Java 内部接口客户端：commit 签到结果。
+"""Java 内部接口客户端：commit 签到结果、失败计数读写（CR-023）。
 
-只在三道门禁全部通过后调用。失败的处理原则：
+只在三道门禁全部通过后调用 commit。失败的处理原则：
   - FA-3003（已签到）视为成功——重复提交是正常的网络重试；
   - 其它失败**不能静默**：签到没落库却告诉学生"成功"，是最坏的结果。
     返回 passed=False + rejectGate=commit，让学生重来一次挑战（60 秒的代价）。
+
+失败计数（CR-023）：finish 判失败后上报 Java 落库（单一写入口原则——
+Python 只提交判定结果，权威计数在 Java/MySQL）。start 前先查计数，
+把「三次失败后本场锁死」拦在采集开始之前，而不是让第 4 次采集白跑。
 """
 from __future__ import annotations
 
 import json
 import urllib.error
+import urllib.parse
 import urllib.request
 
 from app.config import settings
@@ -22,24 +27,24 @@ class JavaError(RuntimeError):
         self.status = status
 
 
-def _call(path: str, body: dict, timeout: float = 8.0) -> dict:
+def _request(method: str, path: str, body: dict | None = None,
+             params: dict | None = None, timeout: float = 8.0) -> dict:
     url = settings.java.base_url.rstrip("/") + path
-    req = urllib.request.Request(
-        url,
-        data=json.dumps(body).encode("utf-8"),
-        headers={
-            "Content-Type": "application/json",
-            "X-Internal-Token": settings.java.internal_token,
-        },
-        method="POST",
-    )
+    if params:
+        url += "?" + urllib.parse.urlencode(params)
+    data = None
+    headers = {"X-Internal-Token": settings.java.internal_token}
+    if body is not None:
+        data = json.dumps(body).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+    req = urllib.request.Request(url, data=data, headers=headers, method=method)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
-            data = json.loads(resp.read().decode("utf-8"))
-            if data.get("code") not in (None, "FA-0000"):
-                raise JavaError(data.get("code", "FA-9001"),
-                                data.get("message", ""), resp.status)
-            return data.get("data") or {}
+            payload = json.loads(resp.read().decode("utf-8"))
+            if payload.get("code") not in (None, "FA-0000"):
+                raise JavaError(payload.get("code", "FA-9001"),
+                                payload.get("message", ""), resp.status)
+            return payload.get("data") or {}
     except urllib.error.HTTPError as e:
         try:
             payload = json.loads(e.read().decode("utf-8"))
@@ -47,6 +52,10 @@ def _call(path: str, body: dict, timeout: float = 8.0) -> dict:
             payload = {}
         raise JavaError(payload.get("code", "FA-9001"),
                         payload.get("message", str(e)), e.code) from e
+
+
+def _call(path: str, body: dict, timeout: float = 8.0) -> dict:
+    return _request("POST", path, body=body, timeout=timeout)
 
 
 def commit_checkin(session_id: int, student_id: int, similarity: float,
@@ -65,4 +74,20 @@ def commit_checkin(session_id: int, student_id: int, similarity: float,
         "identitySim": None if identity_sim is None else round(float(identity_sim), 4),
         "actionCount": int(action_count),
         "actionSeq": action_seq,
+    })
+
+
+def checkin_attempt_status(session_id: int, student_id: int) -> dict:
+    """查刷脸失败计数（CR-023）。返回 {failCount, retryLeft, blocked}。"""
+    return _request("GET", "/internal/checkin/attempt",
+                    params={"sessionId": session_id, "studentId": student_id},
+                    timeout=5.0)
+
+
+def record_checkin_failure(session_id: int, student_id: int, reject_gate: str) -> dict:
+    """上报一次识别失败。返回计数状态（含最新 retryLeft，供结果页渲染）。"""
+    return _call("/internal/checkin/attempt/fail", {
+        "sessionId": session_id,
+        "studentId": student_id,
+        "rejectGate": reject_gate,
     })

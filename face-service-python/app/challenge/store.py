@@ -83,6 +83,12 @@ class ChallengeState:
     baseline_eye: float = 0.0
     eyes: list[float] = field(default_factory=list)
     eye_roi: list[int] = field(default_factory=list)
+    # 姿态一致性闸（2026-11-22，闭眼用）：基线滚转 + 每帧偏航/滚转代理。
+    # 与 eyes 严格同长（同一分支里追加），长度不一致视为部署前的旧状态，
+    # 闸门跳过（保持原判据，见 gates.gate_action）。
+    baseline_roll: float = 0.0
+    eye_yaws: list[float] = field(default_factory=list)
+    eye_rolls: list[float] = field(default_factory=list)
     # 转头（CR-021）：基线偏航代理 + 每帧代理 + 序列里最正脸那一帧的特征。
     # 末帧可能是侧脸，拿它做 1:N 是自伤（similarity 掉下去 → 误判 FA-4002），
     # 所以额外记一帧"离基线偏航最近"的特征，finish 时优先用它。
@@ -119,7 +125,7 @@ class ChallengeStore:
     def create(self, session_id: int, student_id: int, ticket_jti: str,
                action: str, baseline_ratio: float, baseline_degraded: bool,
                baseline_scale: float = 0.0, baseline_eye: float = 0.0,
-               baseline_yaw: float = 0.0) -> ChallengeState:
+               baseline_yaw: float = 0.0, baseline_roll: float = 0.0) -> ChallengeState:
         cid = f"c_{uuid.uuid4().hex[:10]}"
         st = ChallengeState(
             challenge_id=cid,
@@ -136,6 +142,7 @@ class ChallengeStore:
             baseline_scale=baseline_scale,
             baseline_eye=baseline_eye,
             baseline_yaw=baseline_yaw,
+            baseline_roll=baseline_roll,
         )
         self.redis.set(self._key(cid), json.dumps(asdict(st)),
                        ex=settings.challenge.ttl_sec)

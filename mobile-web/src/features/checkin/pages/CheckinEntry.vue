@@ -79,20 +79,30 @@ function enter(s: ActiveSession) {
     showToast('这场你已经签过了')
     return
   }
+  // 识别失败已达上限（CR-023）：join 会以 FA-3005 拒绝，别再送学生进采集页。
+  // 与首页同策略：点这里直接去申诉——锁死之后唯一有意义的动作。
+  if ((s.retryLeft ?? 3) <= 0) {
+    showToast({ message: '识别失败次数已达上限，请提交申诉让老师核对', duration: 2200 })
+    router.push(`/appeal/${s.sessionId}`)
+    return
+  }
   void join(s.sessionId)
 }
 
-/** 申诉中优先于签到状态：有在办申诉时，标签不能还写「待签到」 */
+/** 申诉中优先于签到状态，失败达上限次之：标签不能与真实可做的事矛盾 */
 function tagText(s: ActiveSession) {
   if (s.appealStatus === 'PENDING') return '申诉中'
   if (s.myStatus === 'PRESENT') return '已签到'
   if (s.myStatus === 'LATE') return '迟到'
+  if ((s.retryLeft ?? 3) <= 0) return '识别失败'
   return '待签到'
 }
 
-function tagType(s: ActiveSession): 'primary' | 'success' | 'warning' {
+function tagType(s: ActiveSession): 'primary' | 'success' | 'warning' | 'danger' {
   if (s.appealStatus === 'PENDING') return 'warning'
-  return s.myStatus === 'PRESENT' || s.myStatus === 'LATE' ? 'success' : 'primary'
+  if (s.myStatus === 'PRESENT' || s.myStatus === 'LATE') return 'success'
+  if ((s.retryLeft ?? 3) <= 0) return 'danger'
+  return 'primary'
 }
 
 const faceHint = computed(() => {
@@ -108,10 +118,13 @@ const advice: Record<string, string> = {
   'FA-3001': '这场签到已经结束了，下一次课再签。',
   'FA-3003': '你已经签过了，不用重复签。',
   'FA-3004': '这场的应到名单里没有你，说明你不是这个班的学生。请联系任课老师核对名单。',
-  'FA-3005': '这台手机上失败的次数太多了，稍等一会儿再试，或者提交申诉让老师核对。',
+  'FA-3005': '本场签到的识别失败次数已达上限，不能再刷脸了。',
   'FA-4006': '人脸档案未通过审核，先采集并通过审核。',
   'FA-5001': '你已提交本次申诉，等老师处理即可，这场不用再签到。'
 }
+
+/** 失败次数达上限时，入口页直接给申诉按钮：这是该场次唯一有意义的动作 */
+const canAppealHere = computed(() => failCode.value === 'FA-3005' && hasSession.value)
 </script>
 
 <template>
@@ -131,6 +144,12 @@ const advice: Record<string, string> = {
         <div v-if="faceHint" style="margin: 0 16px 14px">
           <van-button round block type="primary" @click="router.push('/face/enroll')">
             去采集人脸
+          </van-button>
+        </div>
+
+        <div v-if="canAppealHere" style="margin: 0 16px 14px">
+          <van-button round block type="primary" @click="router.push(`/appeal/${sid}`)">
+            提交申诉，让老师核对
           </van-button>
         </div>
       </template>

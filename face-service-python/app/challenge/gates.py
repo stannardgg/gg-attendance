@@ -78,16 +78,43 @@ def gate_action(st: ChallengeState) -> tuple[GateResult, int, int]:
         for y in st.yaws:
             counter.observe(y)
         detected, _ = counter.result()
-        if detected < st.need:
-            # 同闭眼：判失败才记逐帧偏航，供误拒归因
-            logger.info("转头未计数 base=%.3f yaws=%s",
-                        st.baseline_yaw, [round(x, 3) for x in st.yaws])
-        return (GateResult(detected >= st.need, float(detected), float(st.need)),
+        reverse = counter.reverse_count
+        # 反向否决（2026-11-22）：hold=1 下单帧噪声可能碰巧在正向凑出一段
+        # （滚转残余实测最大 0.108，距阈值 0.12 只差 1σ），但「提示左转却右转」
+        # 会在反向留下达标段——反向段存在即说明学生没按指令做，直接判失败。
+        # 正向做对时反向段物理上不会出现（基线|yaw|≤0.10 + 返回中性帧 Δ≈0），
+        # 所以这条否决只堵误放行，不增加误拒。
+        ok = detected >= st.need and reverse == 0
+        if detected < st.need or reverse > 0:
+            # 判失败才记逐帧偏航，供误拒归因；reverse>0 = 相反动作被检出
+            logger.info("转头未计数 base=%.3f yaws=%s detected=%d reverse=%d",
+                        st.baseline_yaw, [round(x, 3) for x in st.yaws],
+                        detected, reverse)
+        return (GateResult(ok, float(detected), float(st.need)),
                 detected, st.need)
 
     if st.action in EYE_ACTIONS:
         if st.baseline_eye <= 0 or not st.eyes:
             # 眼区基线不可得 → 判不了。返回 0/1 而不是抛错：finish 要出可归因的结论。
+            return GateResult(False, 0.0, float(st.need)), 0, st.need
+        # 姿态一致性闸（2026-11-22）：眼框 ROI 在 start 锁定，头部大幅移动会把
+        # 虹膜搬出 ROI，暗度下降被误读成「闭眼」。姿态相对基线超界的帧剔除；
+        # 全部帧超界时直接判未完成（眼区统计整体不可信）。
+        kept: list[float] = []
+        excluded = 0
+        if len(st.eye_yaws) == len(st.eyes) and len(st.eye_rolls) == len(st.eyes):
+            for e, y, r in zip(st.eyes, st.eye_yaws, st.eye_rolls):
+                if (abs(y - st.baseline_yaw) <= settings.action.eye_pose_yaw_max
+                        and abs(r - st.baseline_roll) <= settings.action.eye_pose_roll_max):
+                    kept.append(e)
+                else:
+                    excluded += 1
+        else:
+            # 部署前开的存量 challenge 没有逐帧姿态：跳过闸门，保持原判据
+            kept = list(st.eyes)
+        if not kept:
+            logger.info("闭眼未计数 base=%.3f 姿态超界=%d/%d（头部移动中，眼区统计不可信）",
+                        st.baseline_eye, excluded, len(st.eyes))
             return GateResult(False, 0.0, float(st.need)), 0, st.need
         counter = EyeCloseCounter(
             base_ratio=st.baseline_eye,
@@ -95,14 +122,14 @@ def gate_action(st: ChallengeState) -> tuple[GateResult, int, int]:
             drop_ratio=settings.action.eye_drop_ratio,
             hold_frames=settings.action.eye_hold_frames,
         )
-        for e in st.eyes:
+        for e in kept:
             counter.observe(e)
         detected, _ = counter.result()
         if detected < st.need:
             # 只在判失败时打逐帧值：误拒申诉要能回答"差多少、哪一帧没跟上"，
             # 成功路径没必要刷屏（finish 那行已有 actionCount）。
-            logger.info("闭眼未计数 base=%.3f ratios=%s",
-                        st.baseline_eye, [round(x, 3) for x in st.eyes])
+            logger.info("闭眼未计数 base=%.3f ratios=%s excluded=%d",
+                        st.baseline_eye, [round(x, 3) for x in kept], excluded)
         return (GateResult(detected >= st.need, float(detected), float(st.need)),
                 detected, st.need)
 
@@ -118,7 +145,14 @@ def gate_action(st: ChallengeState) -> tuple[GateResult, int, int]:
         for s in st.scales:
             counter.observe(s)
         detected, _ = counter.result()
-        ok = detected >= st.need
+        reverse = counter.reverse_count
+        # 反向否决（与转头同构）：提示靠近却退远（或反之），反向达标段存在
+        # 即判失败。正向做对时反向段物理上不会出现，不增加误拒。
+        ok = detected >= st.need and reverse == 0
+        if detected < st.need or reverse > 0:
+            logger.info("尺度未计数 base=%.3f scales=%s detected=%d reverse=%d",
+                        st.baseline_scale, [round(x, 3) for x in st.scales],
+                        detected, reverse)
         return GateResult(ok, float(detected), float(st.need)), detected, st.need
 
     counter = MouthActionCounter(

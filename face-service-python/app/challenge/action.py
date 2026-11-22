@@ -99,6 +99,28 @@ def yaw_proxy(face) -> float:
     return float(np.dot(nose - (le + re) / 2.0, v / iod) / iod)
 
 
+def roll_proxy(face) -> float:
+    """滚转代理：眼轴相对图像水平线的夹角（弧度，有符号）。
+
+    与 yaw_proxy 同源（SCRFD 5 点、原图坐标），但用途不是判动作，而是
+    **姿态一致性闸**：固定眼框 ROI 建立在基线帧上，闭眼判据窗内头部一旦
+    偏航/滚转，虹膜会被搬出 ROI，暗度统计跟着失真——「提示闭眼却转头」
+    被误判成闭眼就是这条通道。yaw_proxy 用眼轴投影把滚转消掉了，所以
+    姿态闸需要这里单独给出原始角度。
+
+    符号：正值 = 右眼低于左眼（图像上顺时针歪头）。静止抖动 std≈0.01 rad，
+    ±15° 滚转 = 0.26 rad——probe_action --pose 的标定范围即以此为界。
+    """
+    if face is None:
+        return 0.0
+    kps = np.asarray(face.kps, dtype=np.float64).reshape(5, 2)
+    le, re = kps[0], kps[1]
+    v = re - le
+    if float(np.linalg.norm(v)) <= 1e-6:
+        return 0.0
+    return float(np.arctan2(v[1], v[0]))
+
+
 def eye_dark_ratio(gray: np.ndarray, rois: list[int]) -> float:
     """两只眼框的暗像素占比均值。`rois` 是扁平的 8 个整数（192 空间两组矩形）。"""
     vals = []
@@ -233,21 +255,30 @@ class ScaleActionCounter:
         self._seq = 0
         self._min_ratio = 1.0
         self._max_ratio = 1.0
+        # 反向段追踪（与 TurnActionCounter 同构）：正向计数达标但反向出现过
+        # 达标段 = 学生没按指令做（例如提示靠近却退远，靠单帧噪声凑出正向段），
+        # gates.gate_action 据此否决。
+        self._rev_run: list[float] = []
+        self._in_reverse = False
+        self._reverse_count = 0
 
     def observe(self, scale: float) -> None:
         """喂入一帧的人脸尺度。顺序敏感，乱序帧不应调用。
 
         无效帧（没检出人脸，scale<=0）记为「动作不成立」而不是 0：
         当成 0 会让 MOVE_AWAY 白捡一次（0 必然小于 base*(1-delta)），
-        等于把「没检出」算成「学生做到了」。
+        等于把「没检出」算成「学生做到了」。反向同理——不送检即不计数。
         """
         active = False
+        reverse = False
         if scale > 0:
             ratio = float(scale) / self.base
             self._min_ratio = min(self._min_ratio, ratio)
             self._max_ratio = max(self._max_ratio, ratio)
             active = (ratio >= 1.0 + self.delta) if self.closer \
                 else (ratio <= 1.0 - self.delta)
+            reverse = (ratio <= 1.0 - self.delta) if self.closer \
+                else (ratio >= 1.0 + self.delta)
 
         if active:
             if not self._in_action:
@@ -261,6 +292,16 @@ class ScaleActionCounter:
                     self._segments.append((self._seg_start, self._seq - 1))
                 self._in_action = False
                 self._run = []
+        if reverse:
+            if not self._in_reverse:
+                self._in_reverse = True
+            self._rev_run.append(scale)
+        else:
+            if self._in_reverse:
+                if len(self._rev_run) >= self.hold_frames:
+                    self._reverse_count += 1
+                self._in_reverse = False
+                self._rev_run = []
         self._seq += 1
 
     def result(self) -> tuple[int, list[tuple[int, int]]]:
@@ -268,6 +309,13 @@ class ScaleActionCounter:
         if self._in_action and len(self._run) >= self.hold_frames:
             return self._count + 1, self._segments + [(self._seg_start, self._seq - 1)]
         return self._count, list(self._segments)
+
+    @property
+    def reverse_count(self) -> int:
+        """反向达标段数（含结尾未闭合的段）。> 0 = 出现过与指令相反的动作。"""
+        if self._in_reverse and len(self._rev_run) >= self.hold_frames:
+            return self._reverse_count + 1
+        return self._reverse_count
 
     @property
     def observed_range(self) -> tuple[float, float]:
@@ -383,6 +431,14 @@ class TurnActionCounter:
         self._seq = 0
         self._min_delta = 0.0
         self._max_delta = 0.0
+        # 反向段追踪（2026-11-22）：不只数正向，还要记录反向是否出现过达标段。
+        # 「提示左转却右转」本身不会产生正向计数（方向相对基线带符号），但
+        # hold=1 下单帧噪声可能碰巧在正向凑出一段——转头滚转残余实测最大
+        # 0.108，距阈值 0.12 只差 1σ。反向出现过达标段就说明学生没按指令做，
+        # 正向计数再够也判不过（见 gates.gate_action 的否决逻辑）。
+        self._rev_run: list[float] = []
+        self._in_reverse = False
+        self._reverse_count = 0
 
     def observe(self, yaw: float) -> None:
         """喂入一帧的偏航代理。顺序敏感，乱序帧不应调用。"""
@@ -390,6 +446,7 @@ class TurnActionCounter:
         self._min_delta = min(self._min_delta, d)
         self._max_delta = max(self._max_delta, d)
         active = d >= self.delta
+        reverse = d <= -self.delta
         if active:
             if not self._in_action:
                 self._in_action = True
@@ -402,12 +459,31 @@ class TurnActionCounter:
                     self._segments.append((self._seg_start, self._seq - 1))
                 self._in_action = False
                 self._run = []
+        # 反向状态机与正向同构。刻意展开成平级字段而不是递归一个反实例：
+        # 递归会让反向计数器自己也带一个反向，语义混乱且浪费帧循环。
+        if reverse:
+            if not self._in_reverse:
+                self._in_reverse = True
+            self._rev_run.append(yaw)
+        else:
+            if self._in_reverse:
+                if len(self._rev_run) >= self.hold_frames:
+                    self._reverse_count += 1
+                self._in_reverse = False
+                self._rev_run = []
         self._seq += 1
 
     def result(self) -> tuple[int, list[tuple[int, int]]]:
         if self._in_action and len(self._run) >= self.hold_frames:
             return self._count + 1, self._segments + [(self._seg_start, self._seq - 1)]
         return self._count, list(self._segments)
+
+    @property
+    def reverse_count(self) -> int:
+        """反向达标段数（含结尾未闭合的段）。> 0 = 出现过与指令相反的动作。"""
+        if self._in_reverse and len(self._rev_run) >= self.hold_frames:
+            return self._reverse_count + 1
+        return self._reverse_count
 
     @property
     def observed_delta(self) -> tuple[float, float]:

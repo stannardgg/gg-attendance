@@ -441,3 +441,40 @@ def test_21_要求转头但没动(world):
     assert res["action"] == "TURN_LEFT", res
     assert res["passed"] is False and res["rejectGate"] == "actionCount", res
     assert res["gates"]["actionCount"]["value"] == 0, res
+
+
+# ---------------------------------------------------------------- CR-023 新增场景
+
+def test_22_三次失败后禁止再进(world):
+    """CR-023：识别失败 3 次后，join 以 FA-3005 拒绝，首页 retryLeft=0。
+
+    旧实现里「试过 3 次」只是采集页的本地计数（ResultPanel.attempts），
+    关掉页面回首页再点进去次数就清零，可以无限重试。现在每次判定失败由
+    Python 上报 Java 落库（checkin_attempt），join / 首页列表 / start 三处都拦。
+    """
+    s = flows.start_session(world.teacher, world.class_id, world.course_id, "场景22")
+    st = world.students["s1"]
+
+    j = flows.join(st["client"], s["id"])
+    assert j.status == 200, j.body
+    assert j.data["retryLeft"] == 3, j.data          # JoinData 不再硬编码 3
+    ticket = j.data["checkinTicket"]
+
+    for i in range(3):
+        base, frames, _ = flows.checkin_frames_static(st["person"], n=10)
+        res = flows.run_challenge(world.face, ticket, frames, baseline=base)
+        assert res["passed"] is False, (i, res)
+        # finish 现在必须带权威 retryLeft（CR-023 契约早声明了该字段）
+        assert res.get("retryLeft") == 3 - (i + 1), (i, res)
+
+    # 第 4 次领票：后端拒绝（权威判定，不是前端隐藏按钮）
+    j4 = flows.join(st["client"], s["id"])
+    assert j4.status == 429, j4.body
+    assert j4.code == "FA-3005", j4.body
+
+    # 首页列表：retryLeft=0，前端据此显示「识别失败」并拒绝点击
+    active = st["client"].get("/api/v1/mobile/sessions/active").data
+    mine = [x for x in active if x["sessionId"] == s["id"]]
+    assert mine and mine[0]["retryLeft"] == 0, active
+
+    flows.assert_no_attendance(st["client"], s["id"])
