@@ -128,11 +128,17 @@ public class TeacherService {
             teacher.setName(req.name().trim());
         }
         // 空串 = 清空：JSON 里 null 与"没传"不可区分，只能用空串表达清空
+        boolean clearDepartment = false;
+        boolean clearTitle = false;
         if (req.department() != null) {
-            teacher.setDepartment(blankToNull(req.department()));
+            String v = blankToNull(req.department());
+            teacher.setDepartment(v);
+            clearDepartment = v == null;
         }
         if (req.title() != null) {
-            teacher.setTitle(blankToNull(req.title()));
+            String v = blankToNull(req.title());
+            teacher.setTitle(v);
+            clearTitle = v == null;
         }
 
         Account account = teacher.getAccountId() == null
@@ -166,6 +172,13 @@ public class TeacherService {
         }
 
         teacherMapper.updateById(teacher);
+        // updateById 跳过 null，清空必须单独发一条显式 SET
+        if (clearDepartment) {
+            teacherMapper.updateDepartment(id, null);
+        }
+        if (clearTitle) {
+            teacherMapper.updateTitle(id, null);
+        }
         audit.write("TEACHER_UPDATE", "TEACHER", id,
                 "编辑教师 " + teacher.getTeacherNo()
                         + (passwordReset ? "（已重置登录密码，旧会话已失效）" : ""));
