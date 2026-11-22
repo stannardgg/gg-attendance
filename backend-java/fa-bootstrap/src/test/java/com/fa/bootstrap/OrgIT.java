@@ -271,9 +271,19 @@ class OrgIT extends ItBase {
                 Map.of("department", ""), token);
         assertThat(clear.getStatusCode().value()).as("提交失败：%s", clear.getBody()).isEqualTo(200);
         long requestId = clear.getBody().path("data").path("id").asLong();
-        assertThat(post("/api/v1/admin/teacher-profile-requests/" + requestId + "/handle",
-                Map.of("approved", true), admin).getStatusCode().value()).isEqualTo(200);
-        assertThat(get("/api/v1/teacher/profile", token).getBody().path("data").path("department").isNull())
+        ResponseEntity<JsonNode> handled = post("/api/v1/admin/teacher-profile-requests/" + requestId + "/handle",
+                Map.of("approved", true), admin);
+        assertThat(handled.getStatusCode().value()).as("审核失败：%s", handled.getBody()).isEqualTo(200);
+
+        // 这里断言三件事，失败信息都要带响应体：这条用例在 CI 上偶发过一次失败，
+        // 只报 "Expecting true but was false" 时无法区分「院系没清空」与「令牌已失效」
+        // （401 由过滤器直接写响应，不经过 GlobalExceptionHandler，日志里没有痕迹）。
+        ResponseEntity<JsonNode> cleared = get("/api/v1/teacher/profile", token);
+        assertThat(cleared.getStatusCode().value())
+                .as("读取档案失败（401 = 令牌被 cv 校验拦下）：%s", cleared.getBody())
+                .isEqualTo(200);
+        assertThat(cleared.getBody().path("data").path("department").isNull())
+                .as("院系应被清空，实际档案：%s", cleared.getBody())
                 .isTrue();
     }
 
