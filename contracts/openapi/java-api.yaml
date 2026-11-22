@@ -38,6 +38,8 @@ tags:
     description: 申诉处理
   - name: admin-system
     description: 统计、审计、系统配置
+  - name: student-profile
+    description: 学生密码修改申请（CR-024，自助端仅 STUDENT，审核端在 admin-org）
 
 security:
   - bearerAuth: []
@@ -170,7 +172,8 @@ paths:
         依次校验：① 会话状态且未过 `endAt`（否则 `FA-3001`）；
         ② 应到名单包含该学生（否则 `FA-3004`）；③ 本场未签过（否则 `FA-3003`）；
         ④ 本场没有待处理的申诉（否则 `FA-5001`「你已提交本次申诉」）——
-        申诉与签到互斥，提交后不可再参与该场次；⑤ 人脸档案为 `ACTIVE`（否则 `FA-4006`）。
+        申诉与签到互斥，提交后不可再参与该场次；⑤ 刷脸失败次数未达上限
+        （否则 `FA-3005`，CR-023）；⑥ 人脸档案为 `ACTIVE`（否则 `FA-4006`）。
         课程不参与校验 —— 应到名单只跟班级走（D7）。
       operationId: joinSession
       parameters:
@@ -803,6 +806,115 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ProfileRequestResp' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+      x-error-codes: [FA-1003, FA-2001, FA-2007]
+
+  # -------------------------------------------------------------------
+  # 学生密码修改申请（CR-024）：学生提交 / 管理员审核
+  # -------------------------------------------------------------------
+  /api/v1/student/profile-requests:
+    get:
+      tags: [student-profile]
+      summary: 我的密码修改申请（仅 STUDENT，含历史）
+      operationId: listMyStudentProfileRequests
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/Size'
+      responses:
+        '200':
+          description: 分页列表
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StudentProfileRequestPageResp' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      tags: [student-profile]
+      summary: 提交密码修改申请（仅 STUDENT）
+      description: |
+        学生侧只放开改密一种申请（学号是登录名且由管理员维护）。
+        必须提供 currentPassword（校验失败为 FA-2007，刻意不用 FA-1001/401，
+        避免把用户踢回登录页）；新密码 8~64 位且同时含字母与数字，
+        不能与当前密码相同；只保存 BCrypt 哈希，明文不落库、不进日志、不进审计；
+        同一学生同时只能有一条 PENDING（uk_spr_pending），重复提交同样是 FA-2007。
+        申请通过后 account.credential_version +1，该账号已签发的全部令牌立即失效。
+      operationId: submitStudentProfileRequest
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/StudentProfileRequestSubmitReq' }
+      responses:
+        '200':
+          description: 已提交
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StudentProfileRequestResp' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+      x-error-codes: [FA-1003, FA-2007]
+
+  /api/v1/student/profile-requests/{id}/withdraw:
+    post:
+      tags: [student-profile]
+      summary: 撤回自己的待审申请（仅 STUDENT）
+      operationId: withdrawStudentProfileRequest
+      parameters:
+        - $ref: '#/components/parameters/PathId'
+      responses:
+        '200':
+          description: 已撤回
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StudentProfileRequestResp' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+      x-error-codes: [FA-2001, FA-2007]
+
+  /api/v1/admin/student-profile-requests:
+    get:
+      tags: [admin-org]
+      summary: 学生密码修改申请列表（仅 ADMIN）
+      operationId: listStudentProfileRequests
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/Size'
+        - name: status
+          in: query
+          description: PENDING / APPROVED / REJECTED / WITHDRAWN；空或 ALL 表示全部
+          schema: { type: string, enum: [PENDING, APPROVED, REJECTED, WITHDRAWN, ALL] }
+        - name: keyword
+          in: query
+          description: 学生姓名或学号
+          schema: { type: string }
+      responses:
+        '200':
+          description: 分页列表
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StudentProfileRequestPageResp' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /api/v1/admin/student-profile-requests/{id}/handle:
+    post:
+      tags: [admin-org]
+      summary: 审核密码修改申请（仅 ADMIN；通过即写 account.password_hash 并 cv+1）
+      operationId: handleStudentProfileRequest
+      parameters:
+        - $ref: '#/components/parameters/PathId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ProfileRequestHandleReq' }
+      responses:
+        '200':
+          description: 已审核
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StudentProfileRequestResp' }
         '403': { $ref: '#/components/responses/Forbidden' }
         '404': { $ref: '#/components/responses/NotFound' }
         '409': { $ref: '#/components/responses/Conflict' }
@@ -1814,6 +1926,59 @@ components:
                   properties:
                     items: { type: array, items: { $ref: '#/components/schemas/ProfileRequest' } }
 
+    # ---------- 学生密码修改申请（CR-024） ----------
+    StudentProfileRequestSubmitReq:
+      type: object
+      additionalProperties: false
+      properties:
+        currentPassword:
+          type: string
+          maxLength: 64
+          writeOnly: true
+          description: 当前密码，仅用于确认本人操作；不落库、不回显
+        newPassword:
+          type: string
+          minLength: 8
+          maxLength: 64
+          writeOnly: true
+          description: 新密码，8~64 位且同时含字母与数字；服务端只保存 BCrypt 哈希
+        reason: { type: string, maxLength: 500, nullable: true, description: 学生填写的申请说明，选填 }
+
+    StudentProfileRequest:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        studentId: { type: integer, format: int64 }
+        studentNo: { type: string, description: 学生当前学号（登录名），不是申请值——学生不能申请改学号 }
+        studentName: { type: string, description: 学生当前姓名，不是申请值 }
+        className: { type: string, nullable: true, description: 学生当前班级名，便于管理员辨认 }
+        passwordChange: { type: boolean, description: 恒为 true；字段保留以与教师申请响应同构 }
+        reason: { type: string, nullable: true }
+        status: { type: string, enum: [PENDING, APPROVED, REJECTED, WITHDRAWN] }
+        reviewNote: { type: string, nullable: true }
+        reviewerUsername: { type: string, nullable: true }
+        reviewedAt: { type: string, format: date-time, nullable: true }
+        createdAt: { type: string, format: date-time }
+
+    StudentProfileRequestResp:
+      allOf:
+        - $ref: '#/components/schemas/Result'
+        - type: object
+          properties:
+            data: { $ref: '#/components/schemas/StudentProfileRequest' }
+
+    StudentProfileRequestPageResp:
+      allOf:
+        - $ref: '#/components/schemas/Result'
+        - type: object
+          properties:
+            data:
+              allOf:
+                - $ref: '#/components/schemas/PageMeta'
+                - type: object
+                  properties:
+                    items: { type: array, items: { $ref: '#/components/schemas/StudentProfileRequest' } }
+
     # ---------- 授权范围 ----------
     Scope:
       type: object
@@ -1937,6 +2102,12 @@ components:
             本人对该场次**最新一条**申诉的状态；从未申诉为 null。
             为 PENDING 时前端显示「申诉中」，并且 join 会以 FA-5001 拒绝再次进入
             —— 已提交申诉的场次不可再参与签到。REJECTED / WITHDRAWN 之后仍可正常签到。
+        retryLeft:
+          type: integer
+          description: |
+            剩余可重试次数（CR-023）。0 = 识别失败已达上限：首页显示「识别失败」
+            并拒绝点击，join 会以 FA-3005 拒绝。已签成功（PRESENT/LATE）时无意义，
+            前端不读。
 
     ActiveSessionListResp:
       allOf:

@@ -7,7 +7,34 @@
 
 ## [Unreleased]
 
+### Added
+- **识别失败三次后锁定本场签到（CR-023）**：此前「试过 3 次」只是采集页的本地计数，
+  刷新即清零；关掉页面回首页，场次仍显示「待签到」，可以无限重试。现在失败计数
+  落库（`checkin_attempt`，V7 迁移），Python 判定失败后经内部接口上报 Java——
+  join 达到上限以 `FA-3005`（429）拒绝，`sessions/active` 新增 `retryLeft`，
+  首页/入口页把该场次显示为「识别失败」且点击直接带去申诉页；Python `start`
+  也查计数，旧票据（60s 寿命）偷跑第 4 次同样被拒。`rejectGate=commit`
+  （Java 不可用）不计失败：基础设施故障不转嫁给 学生。附带修正
+  `sys_config.CHECKIN_MAX_RETRY` 种子值 5 → 3（与 §4.4.3、FA-3005 note 对齐）。
+- **学生密码修改走「申请 → 审核」（CR-024）**：学生忘了密码此前只能线下找管理员，
+  改动也没有痕迹。学生「我的」页新增「修改密码」入口：提交申请（验当前密码，
+  防手机被他人顺手改密）→ 管理员端「学生管理 → 密码申请」页签审核（红点计数、
+  驳回必填理由）→ 通过才写 `account.password_hash` 并 `credential_version +1`，
+  旧密码与已签发会话立即失效。密码只存 BCrypt 哈希且仅审核前暂存，
+  通过/驳回/撤回后立即清空；同一学生仅一条 PENDING（`student_profile_request`，
+  V8 迁移，生成列 `uk_spr_pending` 兜底）；学号是登录名，不在可申请范围。
+  接口：`/api/v1/student/profile-requests`（自助）与
+  `/api/v1/admin/student-profile-requests`（审核）。
+
 ### Fixed
+- **闭眼/转头真机识别失败（CR-021 采样修正）**：前端 4fps 采集但服务端单帧实测
+  ~800ms（SCRFD 460ms + ArcFace 260ms），串行上传后有效入库仅 ~1.25fps——
+  「闭眼约 1 秒」只有 1~2 帧落窗，「转头保持半秒」常态 0 帧（0.5s < 0.8s 帧距），
+  `HOLD_FRAMES=2` 时学生按文案做也判不过。改 `EYE_HOLD_FRAMES` / `TURN_HOLD_FRAMES`
+  为 1（闭眼阈值 3.9σ / 转头 11.5σ，单帧误判率可忽略；动作随机抽签下预录无法预知
+  动作码）、`WINDOW_MS_TURN` 2500→3000、转头文案改「保持约 1 秒」；
+  契约 `actions.json` 1.3.1。E2E 全绿是同步逐帧 POST 掩盖了采样稀疏——判据灵敏度
+  与时序可达性须分开验收（§4.4.3-3a）。
 - **改密后新令牌可能被旧快照拦下**：`AccountRoleResolver.invalidate` 原先在事务提交**前**
   清缓存，此刻进来的并发读会从库里读到旧 `credential_version` 并写回缓存，提交后的新值
   被压住最多 30 秒——表现为「刚登录拿到的新令牌被判为已过期」。现在失效注册到
