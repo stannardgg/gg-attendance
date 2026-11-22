@@ -1,11 +1,11 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { showToast } from 'vant'
 import { api, messageOf } from '@/shared/api/client'
 import { auth, logout, refreshFaceStatus } from '@/shared/store/auth'
 import { fmtTime } from '@/shared/utils'
-import type { MobileAttendance } from '@/shared/api/types'
+import type { MobileAttendance, StudentProfileRequest } from '@/shared/api/types'
 
 const router = useRouter()
 const items = ref<MobileAttendance[]>([])
@@ -70,9 +70,94 @@ async function onLogout() {
   router.replace('/login')
 }
 
+/* ---------------- 修改密码（CR-024）：提交申请 → 管理员审核 ---------------- */
+
+const pwOpen = ref(false)
+const pwSaving = ref(false)
+const pwRequests = ref<StudentProfileRequest[]>([])
+const pwForm = reactive({ current: '', next: '', confirm: '', reason: '' })
+
+const pwStatusLabel: Record<string, string> = {
+  PENDING: '待审核',
+  APPROVED: '已通过',
+  REJECTED: '已驳回',
+  WITHDRAWN: '已撤回'
+}
+
+const pendingPw = computed(() => pwRequests.value.find((r) => r.status === 'PENDING'))
+
+async function loadPwRequests() {
+  try {
+    const data = await api.get<{ items: StudentProfileRequest[]; total: number }>(
+      '/api/v1/student/profile-requests',
+      { page: 1, size: 10 }
+    )
+    pwRequests.value = data.items ?? []
+  } catch {
+    // 红点缺失比整页报错好；入口在「我的」页，失败不阻塞签到
+    pwRequests.value = []
+  }
+}
+
+function openPw() {
+  pwForm.current = ''
+  pwForm.next = ''
+  pwForm.confirm = ''
+  pwForm.reason = ''
+  pwOpen.value = true
+  loadPwRequests()
+}
+
+async function submitPw() {
+  if (pendingPw.value) {
+    showToast('已有一条待审核的申请，请等待处理或先撤回')
+    return
+  }
+  if (!pwForm.current) {
+    showToast('请输入当前密码')
+    return
+  }
+  if (pwForm.next.length < 8 || !/[A-Za-z]/.test(pwForm.next) || !/\d/.test(pwForm.next)) {
+    showToast('新密码至少 8 位，须同时包含字母与数字')
+    return
+  }
+  if (pwForm.next !== pwForm.confirm) {
+    showToast('两次输入的新密码不一致')
+    return
+  }
+  pwSaving.value = true
+  try {
+    await api.post('/api/v1/student/profile-requests', {
+      currentPassword: pwForm.current,
+      newPassword: pwForm.next,
+      reason: pwForm.reason.trim() || undefined
+    })
+    pwOpen.value = false
+    showToast('已提交，等待管理员审核')
+    await loadPwRequests()
+  } catch (err) {
+    showToast(messageOf(err))
+  } finally {
+    pwSaving.value = false
+  }
+}
+
+async function withdrawPw() {
+  const row = pendingPw.value
+  if (!row) return
+  try {
+    await api.post(`/api/v1/student/profile-requests/${row.id}/withdraw`, {})
+    showToast('已撤回')
+    await loadPwRequests()
+  } catch (err) {
+    showToast(messageOf(err))
+  }
+}
+
 onMounted(() => {
   load(true)
   refreshFaceStatus()
+  loadPwRequests()
 })
 </script>
 
@@ -92,6 +177,16 @@ onMounted(() => {
         :label="auth.faceStatus?.rejectReason || ''"
         @click="router.push('/face/enroll')"
       />
+      <van-cell
+        title="修改密码"
+        is-link
+        :label="pendingPw ? '有一条申请正在等待管理员审核' : ''"
+        @click="openPw"
+      >
+        <template #value>
+          <van-tag v-if="pendingPw" plain type="warning">审核中</van-tag>
+        </template>
+      </van-cell>
     </van-cell-group>
 
     <div class="head">
@@ -148,6 +243,73 @@ onMounted(() => {
     <div style="margin: 20px 0 30px">
       <van-button round block plain type="danger" @click="onLogout">退出登录</van-button>
     </div>
+
+    <!-- 修改密码：提交申请 → 管理员审核 → 通过后旧密码与旧会话立即失效 -->
+    <van-popup v-model:show="pwOpen" round position="bottom" style="padding: 20px 16px; max-height: 80%">
+      <div class="pw-title">修改密码</div>
+      <van-notice-bar
+        v-if="pendingPw"
+        wrapable
+        :scrollable="false"
+        type="warning"
+        text="已提交申请，等待管理员审核。通过后旧密码立即失效，需要用新密码重新登录。"
+        style="margin-bottom: 12px"
+      />
+      <van-cell-group inset>
+        <van-field
+          v-model="pwForm.current"
+          type="password"
+          label="当前密码"
+          placeholder="用于确认本人操作"
+          maxlength="64"
+        />
+        <van-field
+          v-model="pwForm.next"
+          type="password"
+          label="新密码"
+          placeholder="至少 8 位，含字母与数字"
+          maxlength="64"
+        />
+        <van-field
+          v-model="pwForm.confirm"
+          type="password"
+          label="确认新密码"
+          maxlength="64"
+        />
+        <van-field
+          v-model="pwForm.reason"
+          type="textarea"
+          rows="2"
+          maxlength="500"
+          show-word-limit
+          label="说明"
+          placeholder="选填，便于管理员核对"
+        />
+      </van-cell-group>
+      <p class="muted" style="margin: 10px 6px; font-size: 12px; color: #969799">
+        密码修改由管理员审核后生效，不会直接改密码。
+      </p>
+      <div v-if="pendingPw" style="margin: 8px 0">
+        <van-button round block plain type="danger" @click="withdrawPw">撤回申请</van-button>
+      </div>
+      <div v-else style="margin: 8px 0">
+        <van-button round block type="primary" :loading="pwSaving" @click="submitPw">提交申请</van-button>
+      </div>
+
+      <div v-if="pwRequests.length" class="pw-history">
+        <div class="pw-history-title">申请记录</div>
+        <div v-for="r in pwRequests" :key="r.id" class="pw-row">
+          <span class="pw-time">{{ fmtTime(r.createdAt) }}</span>
+          <span
+            class="pw-status"
+            :style="{ color: r.status === 'APPROVED' ? '#07c160' : r.status === 'REJECTED' ? '#ee0a24' : '#969799' }"
+          >
+            {{ pwStatusLabel[r.status] || r.status }}
+          </span>
+          <span v-if="r.reviewNote" class="pw-note">{{ r.reviewNote }}</span>
+        </div>
+      </div>
+    </van-popup>
   </div>
 </template>
 
@@ -161,5 +323,41 @@ onMounted(() => {
 .title {
   font-size: 13px;
   color: #969799;
+}
+.pw-title {
+  font-size: 16px;
+  font-weight: 600;
+  margin: 0 4px 14px;
+}
+.pw-history {
+  margin-top: 14px;
+  border-top: 1px solid #f0f0f0;
+  padding-top: 10px;
+}
+.pw-history-title {
+  font-size: 13px;
+  color: #969799;
+  margin: 0 4px 8px;
+}
+.pw-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 4px 4px;
+  font-size: 13px;
+}
+.pw-time {
+  color: #969799;
+  flex-shrink: 0;
+}
+.pw-status {
+  flex-shrink: 0;
+}
+.pw-note {
+  color: #969799;
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 </style>

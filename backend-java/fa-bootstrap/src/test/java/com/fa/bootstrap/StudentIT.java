@@ -2,9 +2,11 @@ package com.fa.bootstrap;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
+import com.fa.common.error.ErrorCode;
 import com.fasterxml.jackson.databind.JsonNode;
 import java.io.ByteArrayInputStream;
 import java.nio.charset.StandardCharsets;
+import java.util.List;
 import java.util.Map;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -132,5 +134,115 @@ class StudentIT extends ItBase {
                         "classCode", "ZZZZ" + s, "password", "Student12345"), null);
         assertThat(wrong.getBody().path("message").asText())
                 .isEqualTo("学号、姓名或班级码不匹配");
+    }
+
+    /* ---------------- CR-024 学生密码修改申请 ---------------- */
+
+    /** 建班 + 建学生 + 激活，返回学生信息（studentNo / className）。 */
+    private Map<String, String> createActivatedStudent(String admin, String s) {
+        String classCode = createClassAndGetCode(admin, s);
+        String studentNo = "P" + s;
+        ResponseEntity<JsonNode> created = post("/api/v1/admin/students",
+                Map.of("studentNo", studentNo, "name", "改密生" + s, "classId",
+                        ((Number) get("/api/v1/admin/classes?keyword=I" + s, admin)
+                                .getBody().path("data").path("items").get(0).path("id").asLong())),
+                admin);
+        assertThat(created.getStatusCode().value()).as("建学生失败：%s", created.getBody()).isEqualTo(200);
+        ResponseEntity<JsonNode> ok = post("/api/v1/auth/student/activate",
+                Map.of("studentNo", studentNo, "name", "改密生" + s,
+                        "classCode", classCode, "password", "Student12345"), null);
+        assertThat(ok.getStatusCode().value()).as("激活失败：%s", ok.getBody()).isEqualTo(200);
+        return Map.of("studentNo", studentNo, "className", "导入测试班 " + s);
+    }
+
+    @Test
+    @DisplayName("学生申请改密 → 管理员通过 → 新密码可登录，旧密码与旧令牌立即失效")
+    void studentPasswordRequestFlow() {
+        String admin = login(ADMIN, ADMIN_PWD);
+        String s = suffix();
+        Map<String, String> stu = createActivatedStudent(admin, s);
+        String studentNo = stu.get("studentNo");
+        long studentId = get("/api/v1/admin/students?keyword=" + studentNo, admin)
+                .getBody().path("data").path("items").get(0).path("id").asLong();
+        String oldToken = login(studentNo, "Student12345");
+        String newPassword = "NewStudent123";
+
+        // 缺当前密码 → 409 FA-2007（刻意不是 401，别把用户踢回登录页）
+        ResponseEntity<JsonNode> noCurrent = post("/api/v1/student/profile-requests",
+                Map.of("newPassword", newPassword), oldToken);
+        assertThat(noCurrent.getStatusCode().value()).isEqualTo(409);
+        assertThat(code(noCurrent)).isEqualTo(ErrorCode.PROFILE_REQUEST_CONFLICT.code());
+
+        // 当前密码错 → 同样 FA-2007
+        ResponseEntity<JsonNode> wrongCurrent = post("/api/v1/student/profile-requests",
+                Map.of("newPassword", newPassword, "currentPassword", "not-my-password"), oldToken);
+        assertThat(code(wrongCurrent)).isEqualTo(ErrorCode.PROFILE_REQUEST_CONFLICT.code());
+
+        // 提交成功：状态 PENDING，响应里只有标记，绝不能出现哈希或明文
+        ResponseEntity<JsonNode> submit = post("/api/v1/student/profile-requests",
+                Map.of("newPassword", newPassword, "currentPassword", "Student12345",
+                        "reason", "忘记密码了"), oldToken);
+        assertThat(submit.getStatusCode().value()).as("提交失败：%s", submit.getBody()).isEqualTo(200);
+        assertThat(submit.getBody().path("data").path("status").asText()).isEqualTo("PENDING");
+        assertThat(submit.getBody().path("data").path("passwordChange").asBoolean()).isTrue();
+        assertThat(submit.getBody().toString())
+                .doesNotContain("$2a$")
+                .doesNotContain("newPasswordHash")
+                .doesNotContain(newPassword);
+
+        // 同一学生第二条 PENDING 被唯一键拦下 → FA-2007
+        ResponseEntity<JsonNode> dup = post("/api/v1/student/profile-requests",
+                Map.of("newPassword", "Another12345", "currentPassword", "Student12345"), oldToken);
+        assertThat(dup.getStatusCode().value()).isEqualTo(409);
+        assertThat(code(dup)).isEqualTo(ErrorCode.PROFILE_REQUEST_CONFLICT.code());
+
+        // 学生不能审核，也不能看全局列表
+        long requestId = submit.getBody().path("data").path("id").asLong();
+        assertThat(code(post("/api/v1/admin/student-profile-requests/" + requestId + "/handle",
+                Map.of("approved", true), oldToken))).isEqualTo("FA-1003");
+        assertThat(code(get("/api/v1/admin/student-profile-requests", oldToken))).isEqualTo("FA-1003");
+
+        // 管理员按学号能搜到这条申请，且带学号与班级名
+        List<JsonNode> found = items(get("/api/v1/admin/student-profile-requests?status=PENDING&keyword="
+                + studentNo, admin));
+        assertThat(found).anyMatch(n -> n.path("studentNo").asText().equals(studentNo)
+                && n.path("className").asText().equals(stu.get("className"))
+                && n.path("passwordChange").asBoolean());
+
+        // 驳回必须写理由（不通过，申请仍是 PENDING）
+        ResponseEntity<JsonNode> noReason = post("/api/v1/admin/student-profile-requests/"
+                + requestId + "/handle", Map.of("approved", false), admin);
+        assertThat(noReason.getStatusCode().value()).isEqualTo(409);
+        assertThat(code(noReason)).isEqualTo(ErrorCode.PROFILE_REQUEST_CONFLICT.code());
+
+        // 学生撤回后，管理员再审核 → 已被处理
+        assertThat(post("/api/v1/student/profile-requests/" + requestId + "/withdraw", Map.of(), oldToken)
+                .getStatusCode().value()).isEqualTo(200);
+        assertThat(code(post("/api/v1/admin/student-profile-requests/" + requestId + "/handle",
+                Map.of("approved", true), admin))).isEqualTo(ErrorCode.PROFILE_REQUEST_CONFLICT.code());
+
+        // 重新提交并审核通过
+        ResponseEntity<JsonNode> resubmit = post("/api/v1/student/profile-requests",
+                Map.of("newPassword", newPassword, "currentPassword", "Student12345"), oldToken);
+        long approveId = resubmit.getBody().path("data").path("id").asLong();
+        ResponseEntity<JsonNode> approve = post("/api/v1/admin/student-profile-requests/"
+                + approveId + "/handle", Map.of("approved", true, "note", "已核实本人"), admin);
+        assertThat(approve.getStatusCode().value()).as("审核失败：%s", approve.getBody()).isEqualTo(200);
+        assertThat(approve.getBody().path("data").path("status").asText()).isEqualTo("APPROVED");
+
+        // 凭据版本 +1：旧令牌立即失效
+        assertThat(code(get("/api/v1/student/profile-requests", oldToken))).isEqualTo("FA-1002");
+
+        // 旧密码不能再登录；新密码可以
+        ResponseEntity<JsonNode> oldLogin = post("/api/v1/auth/login",
+                Map.of("username", studentNo, "password", "Student12345"), null);
+        assertThat(oldLogin.getStatusCode().value()).isEqualTo(401);
+        assertThat(code(oldLogin)).isEqualTo("FA-1001");
+        String newToken = login(studentNo, newPassword);
+        assertThat(get("/api/v1/student/profile-requests", newToken).getStatusCode().value()).isEqualTo(200);
+
+        // 审计里能查到这次通过
+        List<JsonNode> logs = items(get("/api/v1/admin/audit-logs?action=STUDENT_PROFILE_APPROVE&size=100", admin));
+        assertThat(logs).anyMatch(n -> n.path("targetId").asLong() == studentId);
     }
 }
