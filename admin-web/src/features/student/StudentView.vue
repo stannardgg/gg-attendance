@@ -3,7 +3,9 @@ import { computed, onMounted, reactive, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { api, messageOf, request } from '@/shared/api/client'
-import type { ClassRow, FaceStatusDetail, ImportResult, StudentRow } from '@/shared/api/types'
+import type { ClassRow, FaceStatusDetail, ImportResult, StudentProfileRequestRow, StudentRow } from '@/shared/api/types'
+
+/* ---------------- 学生档案 ---------------- */
 
 const route = useRoute()
 const loading = ref(false)
@@ -12,6 +14,7 @@ const total = ref(0)
 const page = ref(1)
 const size = ref(20)
 const classes = ref<ClassRow[]>([])
+const tab = ref<'students' | 'requests'>('students')
 const query = reactive({
   classId: undefined as number | undefined,
   keyword: '',
@@ -253,11 +256,118 @@ async function confirmReject() {
   await review(false, rejectReason.value.trim())
 }
 
+/* ---------------- 密码修改申请（CR-024） ---------------- */
+
+const reqPage = ref(1)
+const reqSize = ref(10)
+const reqTotal = ref(0)
+const reqLoading = ref(false)
+const pendingCount = ref(0)
+const requests = ref<StudentProfileRequestRow[]>([])
+const reqQuery = reactive({ status: 'PENDING', keyword: '' })
+
+const pwStatusLabel: Record<string, string> = {
+  PENDING: '待审核',
+  APPROVED: '已通过',
+  REJECTED: '已驳回',
+  WITHDRAWN: '已撤回'
+}
+const pwStatusType: Record<string, TagType> = {
+  PENDING: 'warning',
+  APPROVED: 'success',
+  REJECTED: 'danger',
+  WITHDRAWN: 'info'
+}
+
+async function loadRequests() {
+  reqLoading.value = true
+  try {
+    const data = await api.get<{ items: StudentProfileRequestRow[]; total: number }>(
+      '/api/v1/admin/student-profile-requests',
+      {
+        page: reqPage.value,
+        size: reqSize.value,
+        // "全部"用空串：client 的 buildUrl 会过滤空值
+        status: reqQuery.status === 'ALL' ? '' : reqQuery.status,
+        keyword: reqQuery.keyword
+      }
+    )
+    requests.value = data.items ?? []
+    reqTotal.value = data.total ?? 0
+  } catch (err) {
+    ElMessage.error(messageOf(err))
+  } finally {
+    reqLoading.value = false
+  }
+}
+
+/** 标签上的待审数量：单独查一次 total，不跟当前筛选混在一起。 */
+async function loadPendingCount() {
+  try {
+    const data = await api.get<{ total: number }>('/api/v1/admin/student-profile-requests', {
+      page: 1,
+      size: 1,
+      status: 'PENDING'
+    })
+    pendingCount.value = data.total ?? 0
+  } catch {
+    // 红点缺失比整页报错好
+  }
+}
+
+function onTabChange(name: string | number) {
+  if (name === 'requests' && requests.value.length === 0) {
+    void loadRequests()
+  }
+}
+
+const handleDlg = reactive({
+  open: false,
+  row: null as StudentProfileRequestRow | null,
+  approved: true,
+  note: '',
+  saving: false
+})
+
+function openHandle(row: StudentProfileRequestRow) {
+  handleDlg.row = row
+  handleDlg.approved = true
+  handleDlg.note = ''
+  handleDlg.open = true
+}
+
+async function submitHandle() {
+  if (!handleDlg.row) return
+  if (!handleDlg.approved && !handleDlg.note.trim()) {
+    ElMessage.warning('驳回时要写清理由，学生端会看到这段话')
+    return
+  }
+  handleDlg.saving = true
+  try {
+    await api.post(`/api/v1/admin/student-profile-requests/${handleDlg.row.id}/handle`, {
+      approved: handleDlg.approved,
+      note: handleDlg.note.trim() || null
+    })
+    handleDlg.open = false
+    ElMessage.success(handleDlg.approved ? '已通过，学生旧密码与旧会话已失效' : '已驳回')
+    await Promise.all([loadRequests(), loadPendingCount()])
+  } catch (err) {
+    ElMessage.error(messageOf(err))
+  } finally {
+    handleDlg.saving = false
+  }
+}
+
+function shortTime(value?: string): string {
+  return (value || '').replace('T', ' ').slice(0, 16)
+}
+
 onMounted(async () => {
   const fromQuery = Number(route.query.classId)
   if (Number.isFinite(fromQuery) && fromQuery > 0) query.classId = fromQuery
   await loadClasses()
   await load()
+  await loadPendingCount()
 })
 </script>
 
@@ -272,74 +382,169 @@ onMounted(async () => {
     </div>
 
     <el-card shadow="never">
-      <div class="filters">
-        <el-select
-          v-model="query.classId"
-          clearable
-          filterable
-          placeholder="全部班级"
-          style="width: 220px"
-          @change="load"
-        >
-          <el-option v-for="c in classes" :key="c.id" :label="c.name" :value="c.id" />
-        </el-select>
-        <el-input v-model="query.keyword" placeholder="姓名 / 学号" clearable style="width: 200px" @keyup.enter="load" />
-        <el-select v-model="query.status" clearable placeholder="全部状态" style="width: 130px" @change="load">
-          <el-option label="在读" value="ACTIVE" />
-          <el-option label="已转出" value="TRANSFERRED" />
-          <el-option label="已归档" value="ARCHIVED" />
-        </el-select>
-        <el-button @click="load">查询</el-button>
-        <span class="hint">人脸仅有「已通过」的学生可以刷脸签到。</span>
-      </div>
+      <el-tabs v-model="tab" @tab-change="onTabChange">
+        <el-tab-pane name="students" label="学生列表">
+          <div class="filters">
+            <el-select
+              v-model="query.classId"
+              clearable
+              filterable
+              placeholder="全部班级"
+              style="width: 220px"
+              @change="load"
+            >
+              <el-option v-for="c in classes" :key="c.id" :label="c.name" :value="c.id" />
+            </el-select>
+            <el-input v-model="query.keyword" placeholder="姓名 / 学号" clearable style="width: 200px" @keyup.enter="load" />
+            <el-select v-model="query.status" clearable placeholder="全部状态" style="width: 130px" @change="load">
+              <el-option label="在读" value="ACTIVE" />
+              <el-option label="已转出" value="TRANSFERRED" />
+              <el-option label="已归档" value="ARCHIVED" />
+            </el-select>
+            <el-button @click="load">查询</el-button>
+            <span class="hint">人脸仅有「已通过」的学生可以刷脸签到。</span>
+          </div>
 
-      <el-table :data="rows" v-loading="loading" :row-class-name="rowClass">
-        <el-table-column prop="studentNo" label="学号" width="140" />
-        <el-table-column prop="name" label="姓名" width="110" />
-        <el-table-column prop="className" label="班级" min-width="160" />
-        <el-table-column label="账号" width="100">
-          <template #default="{ row }">
-            <el-tag size="small" :type="row.activated ? 'success' : 'info'">
-              {{ row.activated ? '已激活' : '未激活' }}
-            </el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column label="人脸" width="110">
-          <template #default="{ row }">
-            <el-tag size="small" :type="faceTag[row.faceStatus] || 'info'">
-              {{ faceLabel[row.faceStatus] || row.faceStatus }}
-            </el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column label="学籍" width="100">
-          <template #default="{ row }">
-            <el-tag size="small" :type="row.status === 'ACTIVE' ? 'success' : 'info'">
-              {{ row.status === 'ACTIVE' ? '在读' : row.status === 'TRANSFERRED' ? '已转出' : '已归档' }}
-            </el-tag>
-          </template>
-        </el-table-column>
-        <el-table-column label="操作" width="260" fixed="right">
-          <template #default="{ row }">
-            <el-button link type="primary" @click="openEdit(row)">编辑</el-button>
-            <el-button link type="primary" @click="openFace(row)">人脸</el-button>
-            <el-button link type="danger" @click="remove(row)">删除</el-button>
-          </template>
-        </el-table-column>
-        <template #empty>
-          <el-empty :description="query.classId ? '该班级还没有学生，可用 CSV 批量导入' : '请先选择班级，或用 CSV 批量导入'">
-            <el-button v-if="query.classId" @click="openImport">CSV 导入</el-button>
-          </el-empty>
-        </template>
-      </el-table>
+          <el-table :data="rows" v-loading="loading" :row-class-name="rowClass">
+            <el-table-column prop="studentNo" label="学号" width="140" />
+            <el-table-column prop="name" label="姓名" width="110" />
+            <el-table-column prop="className" label="班级" min-width="160" />
+            <el-table-column label="账号" width="100">
+              <template #default="{ row }">
+                <el-tag size="small" :type="row.activated ? 'success' : 'info'">
+                  {{ row.activated ? '已激活' : '未激活' }}
+                </el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="人脸" width="110">
+              <template #default="{ row }">
+                <el-tag size="small" :type="faceTag[row.faceStatus] || 'info'">
+                  {{ faceLabel[row.faceStatus] || row.faceStatus }}
+                </el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="学籍" width="100">
+              <template #default="{ row }">
+                <el-tag size="small" :type="row.status === 'ACTIVE' ? 'success' : 'info'">
+                  {{ row.status === 'ACTIVE' ? '在读' : row.status === 'TRANSFERRED' ? '已转出' : '已归档' }}
+                </el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="操作" width="260" fixed="right">
+              <template #default="{ row }">
+                <el-button link type="primary" @click="openEdit(row)">编辑</el-button>
+                <el-button link type="primary" @click="openFace(row)">人脸</el-button>
+                <el-button link type="danger" @click="remove(row)">删除</el-button>
+              </template>
+            </el-table-column>
+            <template #empty>
+              <el-empty :description="query.classId ? '该班级还没有学生，可用 CSV 批量导入' : '请先选择班级，或用 CSV 批量导入'">
+                <el-button v-if="query.classId" @click="openImport">CSV 导入</el-button>
+              </el-empty>
+            </template>
+          </el-table>
 
-      <el-pagination
-        v-model:current-page="page"
-        :page-size="size"
-        :total="total"
-        layout="total, prev, pager, next"
-        style="margin-top: 12px; justify-content: flex-end"
-        @current-change="load"
-      />
+          <el-pagination
+            v-model:current-page="page"
+            :page-size="size"
+            :total="total"
+            layout="total, prev, pager, next"
+            style="margin-top: 12px; justify-content: flex-end"
+            @current-change="load"
+          />
+        </el-tab-pane>
+
+        <el-tab-pane name="requests">
+          <template #label>
+            <span>密码申请</span>
+            <el-badge
+              v-if="pendingCount"
+              :value="pendingCount"
+              :max="99"
+              type="danger"
+              style="margin-left: 6px; vertical-align: 1px"
+            />
+          </template>
+
+          <div class="filters">
+            <el-select v-model="reqQuery.status" style="width: 140px" @change="reqPage = 1; loadRequests()">
+              <el-option label="待审核" value="PENDING" />
+              <el-option label="已通过" value="APPROVED" />
+              <el-option label="已驳回" value="REJECTED" />
+              <el-option label="已撤回" value="WITHDRAWN" />
+              <el-option label="全部" value="ALL" />
+            </el-select>
+            <el-input
+              v-model="reqQuery.keyword"
+              placeholder="学生姓名 / 学号"
+              clearable
+              style="width: 200px"
+              @keyup.enter="reqPage = 1; loadRequests()"
+            />
+            <el-button @click="reqPage = 1; loadRequests()">查询</el-button>
+            <span class="hint">学生忘记密码时在这里自助申请；通过审核才生效，旧会话立即失效。</span>
+          </div>
+
+          <el-table :data="requests" v-loading="reqLoading">
+            <el-table-column label="学生" width="160">
+              <template #default="{ row }">
+                <div>{{ row.studentName || '—' }}</div>
+                <div class="sub">{{ row.studentNo || '' }}</div>
+              </template>
+            </el-table-column>
+            <el-table-column prop="className" label="班级" min-width="140">
+              <template #default="{ row }">{{ row.className || '—' }}</template>
+            </el-table-column>
+            <el-table-column label="申请变更" min-width="180">
+              <template #default="{ row }">
+                <div class="diff">
+                  <span class="diff-label">登录密码</span>
+                  <span class="diff-from">••••••</span>
+                  <span class="diff-arrow">→</span>
+                  <span class="diff-to">（申请重置）</span>
+                </div>
+              </template>
+            </el-table-column>
+            <el-table-column prop="reason" label="申请说明" min-width="160">
+              <template #default="{ row }">{{ row.reason || '—' }}</template>
+            </el-table-column>
+            <el-table-column label="状态" width="100">
+              <template #default="{ row }">
+                <el-tag size="small" :type="pwStatusType[row.status]">
+                  {{ pwStatusLabel[row.status] || row.status }}
+                </el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="提交时间" width="150">
+              <template #default="{ row }">{{ shortTime(row.createdAt) }}</template>
+            </el-table-column>
+            <el-table-column label="审核意见" min-width="160">
+              <template #default="{ row }">
+                <div>{{ row.reviewNote || '—' }}</div>
+                <div v-if="row.reviewerUsername" class="sub">{{ row.reviewerUsername }} · {{ shortTime(row.reviewedAt) }}</div>
+              </template>
+            </el-table-column>
+            <el-table-column label="操作" width="90" fixed="right">
+              <template #default="{ row }">
+                <el-button v-if="row.status === 'PENDING'" link type="primary" @click="openHandle(row)">审核</el-button>
+                <span v-else class="sub">—</span>
+              </template>
+            </el-table-column>
+            <template #empty>
+              <el-empty description="没有待处理的密码修改申请" />
+            </template>
+          </el-table>
+
+          <el-pagination
+            v-model:current-page="reqPage"
+            :page-size="reqSize"
+            :total="reqTotal"
+            layout="total, prev, pager, next"
+            style="margin-top: 12px; justify-content: flex-end"
+            @current-change="loadRequests"
+          />
+        </el-tab-pane>
+      </el-tabs>
     </el-card>
 
     <!-- 新建 / 编辑 -->
@@ -449,6 +654,41 @@ onMounted(async () => {
         <el-button type="danger" @click="confirmReject">确认驳回</el-button>
       </template>
     </el-dialog>
+
+    <!-- 密码修改申请审核（CR-024） -->
+    <el-dialog v-model="handleDlg.open" title="审核密码修改申请" width="480px">
+      <el-descriptions :column="1" border size="small">
+        <el-descriptions-item label="学生">
+          {{ handleDlg.row?.studentName }}（{{ handleDlg.row?.studentNo }}）
+        </el-descriptions-item>
+        <el-descriptions-item label="班级">{{ handleDlg.row?.className || '—' }}</el-descriptions-item>
+        <el-descriptions-item label="申请内容">重置登录密码</el-descriptions-item>
+        <el-descriptions-item label="申请说明">{{ handleDlg.row?.reason || '—' }}</el-descriptions-item>
+      </el-descriptions>
+      <el-form label-width="80px" style="margin-top: 14px">
+        <el-form-item label="审核结果">
+          <el-radio-group v-model="handleDlg.approved">
+            <el-radio :value="true">通过</el-radio>
+            <el-radio :value="false">驳回</el-radio>
+          </el-radio-group>
+        </el-form-item>
+        <el-form-item v-if="!handleDlg.approved" label="驳回理由">
+          <el-input v-model="handleDlg.note" type="textarea" :rows="3" maxlength="500" show-word-limit
+            placeholder="驳回必填，学生会看到这段话" />
+        </el-form-item>
+        <el-form-item v-else label="备注">
+          <el-input v-model="handleDlg.note" type="textarea" :rows="2" maxlength="500" show-word-limit
+            placeholder="选填，已核实本人等" />
+        </el-form-item>
+      </el-form>
+      <p class="tip">通过后学生的新密码立即生效，旧密码与已登录会话全部失效；学生需要用新密码重新登录。</p>
+      <template #footer>
+        <el-button @click="handleDlg.open = false">取消</el-button>
+        <el-button :type="handleDlg.approved ? 'primary' : 'danger'" :loading="handleDlg.saving" @click="submitHandle">
+          {{ handleDlg.approved ? '确认通过' : '确认驳回' }}
+        </el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -469,6 +709,30 @@ onMounted(async () => {
 .tip {
   font-size: 12px;
   color: #909399;
+}
+.sub {
+  font-size: 12px;
+  color: #909399;
+}
+.diff {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 13px;
+}
+.diff-label {
+  color: #909399;
+}
+.diff-from {
+  color: #909399;
+  text-decoration: line-through;
+}
+.diff-arrow {
+  color: #c0c4cc;
+}
+.diff-to {
+  color: #1f2d3d;
+  font-weight: 500;
 }
 .result {
   margin-top: 8px;

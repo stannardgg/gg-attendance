@@ -43,6 +43,11 @@ export interface ActiveSession {
   myStatus: 'NOT_STARTED' | 'IN_PROGRESS' | 'PRESENT' | 'LATE'
   /** 本人对该场次最新一条申诉的状态；未申诉为 null/缺失 */
   appealStatus?: 'PENDING' | 'APPROVED' | 'REJECTED' | 'WITHDRAWN' | null
+  /**
+   * 剩余可重试次数（CR-023）。0 = 识别失败已达上限：首页/入口页显示
+   * 「识别失败」并拒绝点击（join 会以 FA-3005 拒绝）。已签成功时无意义。
+   */
+  retryLeft?: number
 }
 
 export interface JoinData {
@@ -180,4 +185,20 @@ export interface EnrollSampleData {
     pitch?: number | null
     qualityScore: number
   }
+}
+
+/** 学生密码修改申请（CR-024）；学生只能申请改密，学号等资料由管理员维护 */
+export interface StudentProfileRequest {
+  id: number
+  studentId: number
+  studentNo?: string
+  studentName?: string
+  className?: string
+  passwordChange?: boolean
+  reason?: string
+  status: AppealStatus
+  reviewNote?: string
+  reviewerUsername?: string
+  reviewedAt?: string
+  createdAt: string
 }

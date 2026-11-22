@@ -253,3 +253,20 @@ export interface AgentCode {
   expiresAt: string
   agentUrl: string
 }
+
+/** 学生密码修改申请（CR-024）；学生只能申请改密，学号等资料由管理员维护 */
+export interface StudentProfileRequestRow {
+  id: number
+  studentId: number
+  studentNo?: string
+  studentName?: string
+  className?: string
+  /** 学生申请了重置密码；恒为 true，字段保留以与教师申请响应同构 */
+  passwordChange?: boolean
+  reason?: string
+  status: AppealStatus
+  reviewNote?: string
+  reviewerUsername?: string
+  reviewedAt?: string
+  createdAt: string
+}
