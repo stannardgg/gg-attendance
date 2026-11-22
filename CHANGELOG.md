@@ -7,7 +7,14 @@
 
 ## [Unreleased]
 
-（暂无）
+### Fixed
+- **改密后新令牌可能被旧快照拦下**：`AccountRoleResolver.invalidate` 原先在事务提交**前**
+  清缓存，此刻进来的并发读会从库里读到旧 `credential_version` 并写回缓存，提交后的新值
+  被压住最多 30 秒——表现为「刚登录拿到的新令牌被判为已过期」。现在失效注册到
+  `afterCompletion`，提交后再删；没有事务的调用路径（单测）行为不变。
+  同时把 `OrgIT.teacherProfileRequestClearField` 的收尾断言改成自诊断形式（先断言 200，
+  再断言 `department` 为 null，均带响应体），避免再次出现「只报 true/false、看不出是
+  没清空还是 401」的排查成本。
 
 ## [1.4.0] - 2026-11-22
 

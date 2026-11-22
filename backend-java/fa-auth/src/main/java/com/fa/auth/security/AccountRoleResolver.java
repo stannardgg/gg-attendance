@@ -6,6 +6,8 @@ import java.time.Duration;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import org.springframework.stereotype.Component;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 /**
  * 按 account.id 解析「当前生效的角色与状态」。
@@ -54,7 +56,24 @@ public class AccountRoleResolver {
         return snapshot;
     }
 
+    /**
+     * 让缓存立即失效。
+     *
+     * <p>必须等事务提交后再删：写路径都是 {@code @Transactional}，若在提交前就把缓存清掉，
+     * 同一瞬间进来的读请求会从库里读到**旧值**并写回缓存，随后提交的新值被这个旧快照压住
+     * 最多 30 秒——症状是"刚改完密码、刚登录拿到的新令牌被判失效"。
+     * 没有事务时（单测、非事务调用）直接删即可。
+     */
     public void invalidate(long accountId) {
+        if (TransactionSynchronizationManager.isSynchronizationActive()) {
+            TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+                @Override
+                public void afterCompletion(int status) {
+                    cache.remove(accountId);
+                }
+            });
+            return;
+        }
         cache.remove(accountId);
     }
 
