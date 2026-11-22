@@ -117,7 +117,9 @@
 - **清空教师的院系/职称不生效**：`PUT /admin/teachers/{id}` 把 `null` 当作"该字段不改"，
   而前端清空时正好发的是 `null`，于是永远改不掉。现约定 `department`/`title` 传**空串**
   表示清空（JSON 无法区分"没传"与"传 null"），前端同步改为发空串；姓名仍不允许清空
-  （`@Pattern` 拦空白）。
+  （`@Pattern` 拦空白）。另修一层：即使传了空串，`updateById` 也会**跳过 null 字段**，
+  清空必须走显式 `SET col = NULL`（`TeacherMapper.updateDepartment/updateTitle`），
+  管理员编辑与教师申请审核两条路径都改用它。
 - **基线帧没有人脸时的失败路径**：CR-018 后白名单只剩尺度动作，原「退回嘴部动作」的
   兜底会把学生送进一个必然失败的动作（`baseline_scale=0`）。现在直接返回 `FA-4001`，
   让学生把脸放进取景框重来，而不是跑完一轮再收「动作次数不足」。

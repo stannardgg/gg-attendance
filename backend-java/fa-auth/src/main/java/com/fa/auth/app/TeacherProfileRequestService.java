@@ -353,13 +353,27 @@ public class TeacherProfileRequestService {
         if (row.getNewName() != null) {
             teacher.setName(row.getNewName());
         }
+        // 空串是「清空」：实体里置 null 后 updateById 会跳过该列，
+        // 所以清空必须单独走一条显式 SET（见 TeacherMapper.updateDepartment）。
+        boolean clearDepartment = false;
+        boolean clearTitle = false;
         if (row.getNewDepartment() != null) {
-            teacher.setDepartment(blankToNull(row.getNewDepartment()));
+            String v = blankToNull(row.getNewDepartment());
+            teacher.setDepartment(v);
+            clearDepartment = v == null;
         }
         if (row.getNewTitle() != null) {
-            teacher.setTitle(blankToNull(row.getNewTitle()));
+            String v = blankToNull(row.getNewTitle());
+            teacher.setTitle(v);
+            clearTitle = v == null;
         }
         teacherMapper.updateById(teacher);
+        if (clearDepartment) {
+            teacherMapper.updateDepartment(teacher.getId(), null);
+        }
+        if (clearTitle) {
+            teacherMapper.updateTitle(teacher.getId(), null);
+        }
 
         boolean credentialChanged = false;
         if (Boolean.TRUE.equals(row.getPasswordChange()) && row.getNewPasswordHash() != null) {
