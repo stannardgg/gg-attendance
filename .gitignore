@@ -55,3 +55,11 @@ face-service-python/**/__pycache__/
 face-service-python/.venv/
 face-service-python/reports/*.png
 face-service-python/vectors.json
+
+# ---- 交付物之外的本机素材（不入库）----
+# 演示版（独立域名 scan-checkin-77609）与业主截图，不属于本仓库代码基线
+workbuddy-checkin/
+效果图/
+# WorkBuddy 工作区文件
+*.genie
+.wbapp_*.genie
