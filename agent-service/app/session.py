@@ -64,6 +64,7 @@ def normalise(result: dict[str, Any]) -> dict[str, Any]:
         "undoable_until": result.get("undoable_until"),
         "error": result.get("error"),
         "citations": result.get("citations") or [],
+        "attachments": result.get("attachments") or [],
         "tool_results": result.get("tool_results") or [],
         "thread_id": ((result.get("__config__") or {}).get("configurable") or {}).get("thread_id"),
     }

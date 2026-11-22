@@ -11,12 +11,14 @@ const pendingAppeals = ref(0)
 
 const menus = computed(() => {
   const isAdmin = auth.profile?.role === 'ADMIN'
+  const isTeacher = auth.profile?.role === 'TEACHER'
   return [
     { path: '/dashboard', label: '概览', icon: 'Odometer' },
     { path: '/classes', label: '班级管理', icon: 'School' },
     { path: '/courses', label: '课程管理', icon: 'Notebook' },
     { path: '/students', label: '学生管理', icon: 'User' },
     ...(isAdmin ? [{ path: '/teachers', label: '教师与授权', icon: 'Avatar' }] : []),
+    ...(isTeacher ? [{ path: '/profile', label: '我的资料', icon: 'Postcard' }] : []),
     { path: '/sessions/new', label: '发起签到', icon: 'VideoPlay' },
     { path: '/sessions', label: '签到场次', icon: 'List' },
     { path: '/attendance', label: '考勤查询', icon: 'DataLine' },

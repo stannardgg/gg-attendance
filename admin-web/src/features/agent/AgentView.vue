@@ -24,6 +24,7 @@ const src = computed(() => agentUrl.value)
 
 const quickQuestions = [
   '今天有哪些签到',
+  '导出近两天考勤记录',
   '有哪些待处理申诉',
   '本周各班出勤率是多少',
   '帮我给计算机 2024 级 1 班发起高等数学（上）签到'
@@ -130,29 +131,6 @@ onBeforeUnmount(() => {
         @load="loaded = true"
       />
     </div>
-
-    <div class="gates">
-      <div class="gate">
-        <b>1 授权</b>
-        <span>越出授权班级 / 课程直接 FA-6004，模型拿不到数据。</span>
-      </div>
-      <div class="gate">
-        <b>2 预览</b>
-        <span>写操作先回字段级 diff、影响条数、可否撤销，不落库。</span>
-      </div>
-      <div class="gate">
-        <b>3 确认</b>
-        <span>人工点「执行」才继续；取消即丢弃，令牌随参数作废。</span>
-      </div>
-      <div class="gate">
-        <b>4 令牌</b>
-        <span>60 秒单次，paramsHash 绑定参数，改一个字就 FA-6003。</span>
-      </div>
-      <div class="gate">
-        <b>5 留痕</b>
-        <span>写 agent_action_log，30 分钟内可撤销，令牌只存指纹。</span>
-      </div>
-    </div>
   </div>
 </template>
 
@@ -212,25 +190,5 @@ onBeforeUnmount(() => {
   justify-content: center;
   color: #909399;
   font-size: 14px;
-}
-.gates {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-  gap: 10px;
-  margin-top: 10px;
-}
-.gate {
-  background: #fafafa;
-  border: 1px solid #f0f0f0;
-  border-radius: 6px;
-  padding: 8px 10px;
-  font-size: 12px;
-  color: #606266;
-  line-height: 1.5;
-}
-.gate b {
-  display: block;
-  color: #303133;
-  margin-bottom: 2px;
 }
 </style>

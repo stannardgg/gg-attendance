@@ -17,6 +17,13 @@
    输出 `delta / std` 即分离度，§4.4.1 要求 ≥3。注意这仍是合成素材：
    它证明的是指标本身的保真度，真人动作的准确率要靠现场录制视频复核。
 
+4. `--eye`：闭眼判据（眼框暗像素占比下降）的分离度。用肤色覆盖眼睑 + 保留
+   睫毛线来合成「闭眼」，逐人量睁眼/闭眼差值与静止噪声。
+
+5. `--pose`：转头判据（SCRFD 5 点偏航代理）的噪声与滚转不变性。**无法合成
+   真转头**（正面贴图的投影变换不会让鼻尖相对双眼位移），所以只量分母：
+   静止噪声 σ 与歪头漂移；信号幅度按解剖值估算。
+
 输出：每段视频的 expected vs detected，以及总体准确率。
 """
 from __future__ import annotations
@@ -261,6 +268,177 @@ def run_scale(face_path: str) -> int:
     return 0 if ok else 2
 
 
+def _e2e_synth():
+    """复用 tests/e2e/synth.py 的合成帧工厂（闭眼素材只有一份，避免两份口径）。"""
+    import importlib.util
+    path = os.path.join(REPO_ROOT, "tests", "e2e", "synth.py")
+    spec = importlib.util.spec_from_file_location("e2e_synth", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    mod.DATASET = CASIA
+    return mod
+
+
+def _subjects(n: int) -> list[str]:
+    return sorted(s for s in os.listdir(CASIA)
+                  if os.path.isdir(os.path.join(CASIA, s)) and s.isdigit())[:n]
+
+
+def rotate_about(frame: np.ndarray, center: tuple[float, float], deg: float) -> np.ndarray:
+    """整帧绕指定点旋转，画布放大到不裁边（裁掉脸角的旋转会污染关键点）。"""
+    h, w = frame.shape[:2]
+    diag = int(np.ceil(np.hypot(h, w)))
+    canvas = cv2.copyMakeBorder(frame, (diag - h) // 2, (diag - h + 1) // 2,
+                                (diag - w) // 2, (diag - w + 1) // 2,
+                                cv2.BORDER_REPLICATE)
+    cx, cy = center[0] + (diag - w) // 2, center[1] + (diag - h) // 2
+    m = cv2.getRotationMatrix2D((cx, cy), deg, 1.0)
+    return cv2.warpAffine(canvas, m, (diag, diag), borderMode=cv2.BORDER_REPLICATE)
+
+
+def run_eye(n: int = 80) -> int:
+    """闭眼判据的分离度：睁眼 vs 肤色覆盖眼睑，外加静止抖动噪声。"""
+    from app.challenge.action import EyeCloseCounter, eye_dark_ratio
+
+    synth = _e2e_synth()
+    lm = landmarker()
+
+    def eye_of(fr, fc, rois=None):
+        """按服务端口径算眼框暗度：192 空间由**当前** bbox 建立，眼框用**基线锁定的**那一组。"""
+        if rois is None:
+            pts, _ = lm.landmarks(fr, fc.bbox)
+            rois = lm.eye_rects(pts)
+        gray = cv2.cvtColor(lm.align_space(fr, fc.bbox), cv2.COLOR_BGR2GRAY)
+        return eye_dark_ratio(gray, rois)
+
+    rows = []
+    for s in _subjects(n):
+        img = cv2.imread(os.path.join(CASIA, s, f"{s}_0.jpg"))
+        if img is None:
+            continue
+        frame = synth.composite(img)
+        face, _ = synth.largest_face(frame)
+        if face is None:
+            continue
+        pts, _ = lm.landmarks(frame, face.bbox)
+        locked = lm.eye_rects(pts)                       # 基线帧锁定，后续帧复用
+        shut = synth.close_eyes(frame)
+        shut_face, _ = synth.largest_face(shut)
+        if shut_face is None:
+            continue
+        rows.append((s, eye_of(frame, face, locked), eye_of(shut, shut_face, locked)))
+
+    if not rows:
+        print("没有可用样本")
+        return 2
+    opened = np.array([r[1] for r in rows])
+    closed = np.array([r[2] for r in rows])
+    drops = opened - closed
+
+    # 静止噪声：抖动 ±4px + 亮度 ±5% + JPEG q60。眼框沿用该身份首帧锁定的一组，
+    # 不逐帧重算——否则抖动被"跟踪"抵消，σ 会被低估。
+    rng = np.random.default_rng(20261122)
+    noise = []
+    for s, _, _ in rows[:12]:
+        img = cv2.imread(os.path.join(CASIA, s, f"{s}_0.jpg"))
+        base_frame = composite_at(img)
+        f0 = detector().detect_largest(base_frame)
+        if f0 is None:
+            continue
+        pts0, _ = lm.landmarks(base_frame, f0.bbox)
+        locked0 = lm.eye_rects(pts0)
+        b = eye_of(base_frame, f0, locked0)
+        for _ in range(8):
+            fr = composite_at(img, dx=int(rng.integers(-4, 5)), dy=int(rng.integers(-4, 5)),
+                              brightness=float(rng.uniform(0.95, 1.05)))
+            ok, enc = cv2.imencode(".jpg", fr, [cv2.IMWRITE_JPEG_QUALITY, 60])
+            if ok:
+                fr = cv2.imdecode(enc, cv2.IMREAD_COLOR)
+            fc = detector().detect_largest(fr)
+            if fc is not None:
+                noise.append(eye_of(fr, fc, locked0) - b)
+    std = float(np.std(noise)) if noise else 0.0
+
+    drop = settings.action.eye_dark_drop
+    sep = drop / std if std > 0 else float("inf")
+    print(f"样本 {len(rows)}；睁眼 mean={opened.mean():.3f} std={opened.std():.3f}"
+          f"；闭眼 mean={closed.mean():.3f}")
+    print(f"逐人降幅 mean={drops.mean():.3f} std={drops.std():.3f} min={drops.min():+.3f}"
+          f"；降幅 ≥ {drop:.2f} 的比例 {(drops >= drop).sum()}/{len(drops)}")
+    print(f"静止噪声 std={std:.4f}（{len(noise)} 帧，抖动±4px + JPEG q60 + 亮度±5%）")
+    print(f"分离度：abs_drop / std = {drop:.2f} / {std:.4f} = {sep:.1f}σ"
+          f"（§4.4.1 要求 ≥3σ）{'✓' if sep >= 3 else '✗'}")
+
+    # 计数器端到端：睁眼 3 帧 → 闭眼 4 帧 → 睁眼 3 帧
+    s, o, c = rows[0]
+    counter = EyeCloseCounter(base_ratio=o, abs_drop=drop,
+                              drop_ratio=settings.action.eye_drop_ratio,
+                              hold_frames=settings.action.eye_hold_frames)
+    for r in [o] * 3 + [c] * 4 + [o] * 3:
+        counter.observe(r)
+    got = counter.result()[0]
+    print(f"计数自检（{s}）：期望 1，实得 {got} {'✓' if got == 1 else '✗'}")
+    ok = sep >= 3 and got == 1
+    print(f"\n结论：{'通过' if ok else '不通过'}"
+          "（合成素材只证明判据保真度，真人准确率需现场录制视频复核）")
+    return 0 if ok else 2
+
+
+def run_pose(n: int = 40) -> int:
+    """转头判据：偏航代理的静止噪声、跨身份分布与滚转（歪头）不变性。
+
+    这里**不**能合成"真转头"：CASIA 是正面平面贴图，投影变换不会让鼻尖相对
+    双眼中点位移（那是 3D 突出部才有的效应）。所以本探针只量分母（噪声、滚转
+    漂移），信号幅度按解剖值估算：鼻尖前凸 ≈0.30~0.35×瞳距，偏移 ≈ p·sinθ。
+    """
+    from app.challenge.action import yaw_proxy
+
+    rng = np.random.default_rng(20261122)
+    base_vals, noise, rolls = [], [], []
+    for s in _subjects(n):
+        img = cv2.imread(os.path.join(CASIA, s, f"{s}_0.jpg"))
+        if img is None:
+            continue
+        frame = composite_at(img)
+        f0 = detector().detect_largest(frame)
+        if f0 is None:
+            continue
+        y0 = yaw_proxy(f0)
+        base_vals.append(y0)
+        cx = (f0.bbox[0] + f0.bbox[2]) / 2
+        cy = (f0.bbox[1] + f0.bbox[3]) / 2
+        for _ in range(6):
+            fr = composite_at(img, dx=int(rng.integers(-4, 5)), dy=int(rng.integers(-4, 5)),
+                              brightness=float(rng.uniform(0.95, 1.05)))
+            fc = detector().detect_largest(fr)
+            if fc is not None:
+                noise.append(yaw_proxy(fc) - y0)
+        for deg in (-30, -15, 15, 30):
+            fc = detector().detect_largest(rotate_about(frame, (cx, cy), deg))
+            if fc is not None:
+                rolls.append(abs(yaw_proxy(fc) - y0))
+
+    if not base_vals:
+        print("没有可用样本")
+        return 2
+    bv = np.array(base_vals)
+    std = float(np.std(noise)) if noise else 0.0
+    delta = settings.action.turn_delta
+    sep = delta / std if std > 0 else float("inf")
+    print(f"样本 {len(base_vals)}；基线代理 mean={bv.mean():+.4f} std={bv.std():.4f} "
+          f"min={bv.min():+.4f} max={bv.max():+.4f}")
+    print(f"静止噪声 std={std:.4f}（{len(noise)} 帧，抖动±4px + JPEG q60 + 亮度±5%）")
+    print(f"滚转 ±15/±30° 漂移 mean|Δ|={np.mean(rolls):.4f} max|Δ|={np.max(rolls):.4f}"
+          f"（阈值 {delta:.2f}）")
+    print(f"分离度：delta / std = {delta:.2f} / {std:.4f} = {sep:.1f}σ"
+          f"（§4.4.1 要求 ≥3σ）{'✓' if sep >= 3 else '✗'}")
+    print(f"对应转角：arcsin({delta:.2f}/0.30) ≈ {np.degrees(np.arcsin(min(delta / 0.30, 1))):.0f}°"
+          "（按鼻尖前凸 0.30×瞳距估算）")
+    ok = sep >= 3 and np.max(rolls) <= delta * 1.5
+    print(f"\n结论：{'通过' if ok else '不通过'}（信号幅度需真人视频复核）")
+    return 0 if ok else 2
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="动作判定探针")
     parser.add_argument("--video", action="append", default=[],
@@ -271,6 +449,10 @@ def main() -> int:
                         help="用 CASIA 人脸合成序列自检脚本")
     parser.add_argument("--scale", action="store_true",
                         help="实测尺度类动作（靠近/离远）的分离度")
+    parser.add_argument("--eye", action="store_true",
+                        help="实测闭眼判据（眼框暗度）的分离度")
+    parser.add_argument("--pose", action="store_true",
+                        help="实测转头判据（5 点偏航代理）的噪声与滚转不变性")
     parser.add_argument("--face", default=None, help="合成模式用的人脸图")
     args = parser.parse_args()
 
@@ -278,6 +460,10 @@ def main() -> int:
 
     if args.scale:
         return run_scale(args.face or os.path.join(CASIA, "000", "000_0.jpg"))
+    if args.eye:
+        return run_eye()
+    if args.pose:
+        return run_pose()
 
     results: list[dict] = []
 

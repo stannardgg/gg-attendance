@@ -1,41 +1,8 @@
 {
-  "$comment": "动作可测性白名单。眨眼/转头/点头在 v2.0 明确禁用（§4.4.1）。新增动作前必须先跑 scripts/probe_action.py 量出分离度 ≥3 倍标准差，否则不得上线。",
-  "version": "1.1.0",
+  "$comment": "动作可测性白名单。新增动作前必须先跑 scripts/probe_action.py 量出分离度 ≥3 倍标准差，否则不得上线。停用动作留在 disabled 里备查，不进 actions。",
+  "version": "1.3.0",
   "frozen": true,
   "actions": [
-    {
-      "code": "MOUTH_ONCE",
-      "label": "张嘴一次",
-      "instruction": "请张一次嘴，约半秒",
-      "need": 1,
-      "windowMs": 2000,
-      "minFrames": 8,
-      "enabled": true,
-      "criterion": {
-        "metric": "mouth_roi_dark_ratio",
-        "base": "min(基线帧嘴区暗度, 序列最低嘴区暗度)",
-        "segmentMinFrames": 2,
-        "absRise": 0.05,
-        "riseRatio": 1.45
-      }
-    },
-    {
-      "code": "MOUTH_TWICE",
-      "label": "张嘴两次",
-      "instruction": "请连着张两次嘴，每次约半秒",
-      "need": 2,
-      "windowMs": 3000,
-      "minFrames": 8,
-      "enabled": true,
-      "criterion": {
-        "metric": "mouth_roi_dark_ratio",
-        "base": "min(基线帧嘴区暗度, 序列最低嘴区暗度)",
-        "segmentMinFrames": 2,
-        "absRise": 0.05,
-        "riseRatio": 1.45
-      },
-      "note": "窗口 3.0s / 12 帧；实际收到 <10 帧时返回「网络不稳，请重试」而不判失败（§4.4.3）"
-    },
     {
       "code": "MOVE_CLOSER",
       "label": "靠近",
@@ -51,7 +18,7 @@
         "delta": 0.18,
         "direction": "closer"
       },
-      "note": "CR-015。人脸已占画面 ≥80% 时该动作不参与随机（学生无法再靠近）"
+      "note": "CR-016。人脸已占画面 ≥80% 时该动作不参与随机（学生无法再靠近）"
     },
     {
       "code": "MOVE_AWAY",
@@ -68,14 +35,78 @@
         "delta": 0.18,
         "direction": "away"
       },
-      "note": "CR-015。缩 18% 后短边 <70px 时该动作不参与随机（会掉出检测下限）"
+      "note": "CR-016。缩 18% 后短边 <70px 时该动作不参与随机（会掉出检测下限）"
+    },
+    {
+      "code": "EYE_CLOSE",
+      "label": "闭眼",
+      "instruction": "请闭上眼睛约 1 秒，再睁开",
+      "need": 1,
+      "windowMs": 3000,
+      "minFrames": 8,
+      "enabled": true,
+      "criterion": {
+        "metric": "eye_dark_ratio",
+        "base": "基线帧眼框暗像素占比均值（两眼）",
+        "segmentMinFrames": 2,
+        "delta": 0.06,
+        "dropRatio": 0.6,
+        "direction": "close"
+      },
+      "note": "CR-021。这不是「眨眼」而是「闭眼保持」：4fps 采样抓不住 100~300ms 的眨眼（采样定理问题），改成闭住约 1 秒后同一套眼区判据可稳定检出。基线眼区暗度 <0.10 或瞳距 <45px 时不参与随机"
+    },
+    {
+      "code": "TURN_LEFT",
+      "label": "向左转头",
+      "instruction": "请把头慢慢转向你的左边，约 25 度，保持半秒",
+      "need": 1,
+      "windowMs": 2500,
+      "minFrames": 8,
+      "enabled": true,
+      "criterion": {
+        "metric": "yaw_proxy",
+        "base": "基线帧 (鼻尖-双眼中点)·眼轴 / 瞳距",
+        "segmentMinFrames": 2,
+        "delta": 0.12,
+        "direction": "left"
+      },
+      "note": "CR-021。判据用 SCRFD 的 5 点（原图坐标），不是 2d106det 的形状回归结果。基线已偏头（|代理|>0.10）或人脸贴近画面边缘时不参与随机"
+    },
+    {
+      "code": "TURN_RIGHT",
+      "label": "向右转头",
+      "instruction": "请把头慢慢转向你的右边，约 25 度，保持半秒",
+      "need": 1,
+      "windowMs": 2500,
+      "minFrames": 8,
+      "enabled": true,
+      "criterion": {
+        "metric": "yaw_proxy",
+        "base": "基线帧 (鼻尖-双眼中点)·眼轴 / 瞳距",
+        "segmentMinFrames": 2,
+        "delta": 0.12,
+        "direction": "right"
+      },
+      "note": "同上，方向相反。方向符号假定上传帧未镜像（前端只在 <video> 上做 CSS 镜像）"
     }
   ],
   "disabled": [
-    { "code": "BLINK", "reason": "4fps 采样率抓不住 100~300ms 的眨眼，是采样定理问题，调参无解" },
-    { "code": "TURN_LEFT", "reason": "2d106det 是形状回归器，会把偏转归一化掉，偏 20° 指标只变 0.03~0.05" },
-    { "code": "TURN_RIGHT", "reason": "同上" },
-    { "code": "NOD", "reason": "同上" }
+    {
+      "code": "MOUTH_ONCE",
+      "reason": "CR-018 产品决定停用：签到不再要求学生张嘴。判据本身是可测的（嘴区 ROI 暗度 17 倍分离），停的是交互要求而不是可测性。判据代码与阈值保留，回滚只需把本码加回 FA_ACTION_WHITELIST 并重建 face 容器"
+    },
+    {
+      "code": "MOUTH_TWICE",
+      "reason": "同上（CR-018）。停用后动作库没有 need=2 的动作，验收场景 08 由「要求两次只做一次」改为「要求靠近但完全没动」"
+    },
+    {
+      "code": "BLINK",
+      "reason": "CR-021 由 EYE_CLOSE 取代。4fps（250ms/帧）抓不住 100~300ms 的眨眼，再要求连续 2 帧达标时真人做对也判不过——采样定理问题，调参无解。「闭眼保持 1 秒」保留了同一交互意图且可稳定检出"
+    },
+    {
+      "code": "NOD",
+      "reason": "2d106det 是形状回归器，会把俯仰归一化掉；SCRFD 5 点里没有下巴/额头参照，俯仰代理的分离度未经验证，不上线"
+    }
   ],
-  "constraint": "★ 全局约束：关键点只用于定位 ROI 与 RGB 活体，判动作用「ROI 亮度统计」或「检测框尺度」。这两类信号都不经过 2d106det 的形状归一化；任何用关键点开合比/角度做判据的实现都违背 v2.0（§4.4.1）"
+  "constraint": "★ 全局约束：判动作用「ROI 亮度统计」「检测框尺度」或「SCRFD 5 点在原图坐标下的几何量（鼻尖偏移/瞳距）」。禁止用 2d106det 的形状回归结果（开合比/角度）做判据——它会把偏转与局部形变归一化掉（§4.4.1）"
 }

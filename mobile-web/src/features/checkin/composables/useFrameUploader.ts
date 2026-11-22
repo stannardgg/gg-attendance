@@ -192,7 +192,8 @@ export function useFrameUploader(opts: Options) {
   }
 
   /** 等上传队列排空。设上限是为了不让交卷被网络问题无限拖住。
-   *  上限按最坏情况留够：MOUTH_TWICE 窗口 3s、单帧 CPU 推理 ~0.85s，12 帧约 10s。 */
+   *  上限按最坏情况留够：尺度动作窗口 2.5s、单帧 CPU 推理 ~0.85s，排队积压约 10s。
+   *  （CR-018 前最坏情况是 MOUTH_TWICE 的 3s 窗口，上限按更长的那个留即可。） */
   async function drainSettled(timeoutMs = 15000) {
     const deadline = Date.now() + timeoutMs
     while ((queue.length > 0 || uploading) && Date.now() < deadline) {

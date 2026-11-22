@@ -699,6 +699,115 @@ paths:
               schema: { $ref: '#/components/schemas/EmptyResp' }
         '403': { $ref: '#/components/responses/Forbidden' }
 
+  # -------------------------------------------------------------------
+  # 教师账号与资料修改申请（CR-019 / CR-022）：教师提交 / 管理员审核
+  # -------------------------------------------------------------------
+  /api/v1/teacher/profile-requests:
+    get:
+      tags: [teacher-profile]
+      summary: 我的修改申请（仅 TEACHER，含历史）
+      operationId: listMyProfileRequests
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/Size'
+      responses:
+        '200':
+          description: 分页列表
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProfileRequestPageResp' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+    post:
+      tags: [teacher-profile]
+      summary: 提交修改申请（仅 TEACHER；资料 + 登录用户名 + 密码）
+      description: |
+        字段为 null 表示本次不申请；department/title 传空串表示清空该字段。
+        至少一项与当前值不同，否则 FA-2007；
+        申请改 username 或 newPassword 时必须同时提供 currentPassword（校验失败也是 FA-2007，
+        刻意不用 FA-1001/401，避免把用户踢回登录页）；
+        新密码只存 BCrypt 哈希，明文不落库、不进日志、不进审计；
+        同一教师同时只能有一条 PENDING（uk_tpr_pending），重复提交同样是 FA-2007。
+      operationId: submitProfileRequest
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ProfileRequestSubmitReq' }
+      responses:
+        '200':
+          description: 已提交
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProfileRequestResp' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '409': { $ref: '#/components/responses/Conflict' }
+      x-error-codes: [FA-1003, FA-2007]
+
+  /api/v1/teacher/profile-requests/{id}/withdraw:
+    post:
+      tags: [teacher-profile]
+      summary: 撤回自己的待审申请（仅 TEACHER）
+      operationId: withdrawProfileRequest
+      parameters:
+        - $ref: '#/components/parameters/PathId'
+      responses:
+        '200':
+          description: 已撤回
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProfileRequestResp' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+      x-error-codes: [FA-2001, FA-2007]
+
+  /api/v1/admin/teacher-profile-requests:
+    get:
+      tags: [admin-org]
+      summary: 修改申请列表（仅 ADMIN）
+      operationId: listProfileRequests
+      parameters:
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/Size'
+        - name: status
+          in: query
+          description: PENDING / APPROVED / REJECTED / WITHDRAWN；空或 ALL 表示全部
+          schema: { type: string, enum: [PENDING, APPROVED, REJECTED, WITHDRAWN, ALL] }
+        - name: keyword
+          in: query
+          description: 教师姓名或工号
+          schema: { type: string }
+      responses:
+        '200':
+          description: 分页列表
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProfileRequestPageResp' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+
+  /api/v1/admin/teacher-profile-requests/{id}/handle:
+    post:
+      tags: [admin-org]
+      summary: 审核修改申请（仅 ADMIN；通过即写 teacher/account 并记审计）
+      operationId: handleProfileRequest
+      parameters:
+        - $ref: '#/components/parameters/PathId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ProfileRequestHandleReq' }
+      responses:
+        '200':
+          description: 已审核
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ProfileRequestResp' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+      x-error-codes: [FA-1003, FA-2001, FA-2007]
+
   /api/v1/admin/teacher-scopes:
     get:
       tags: [admin-org]
@@ -1595,9 +1704,18 @@ components:
       additionalProperties: false
       properties:
         name: { type: string, maxLength: 64 }
-        department: { type: string, maxLength: 120, nullable: true }
-        title: { type: string, maxLength: 64, nullable: true }
+        department: { type: string, maxLength: 120, nullable: true, description: 空串表示清空 }
+        title: { type: string, maxLength: 64, nullable: true, description: 空串表示清空 }
         status: { type: string, enum: [ACTIVE, DISABLED] }
+        password:
+          type: string
+          minLength: 8
+          maxLength: 64
+          nullable: true
+          writeOnly: true
+          description: |
+            管理员直接重置密码（教师忘记密码时的兜底；教师自助改密走 profile-requests 审批链）。
+            不传表示不改；重置后该账号 credential_version +1，此前签发的令牌立即失效。
 
     TeacherResp:
       allOf:
@@ -1617,6 +1735,84 @@ components:
                 - type: object
                   properties:
                     items: { type: array, items: { $ref: '#/components/schemas/Teacher' } }
+
+    # ---------- 教师账号与资料修改申请（CR-019 / CR-022） ----------
+    ProfileRequestSubmitReq:
+      type: object
+      additionalProperties: false
+      properties:
+        name: { type: string, maxLength: 64, nullable: true, description: 留空表示不申请改姓名 }
+        department: { type: string, maxLength: 120, nullable: true, description: 空串表示清空院系 }
+        title: { type: string, maxLength: 64, nullable: true, description: 空串表示清空职称 }
+        username:
+          type: string
+          maxLength: 32
+          nullable: true
+          description: 新登录用户名（teacher_no 与 account.username 双写）；不能含空格，与当前一致视为不申请
+        currentPassword:
+          type: string
+          maxLength: 64
+          nullable: true
+          writeOnly: true
+          description: 当前密码，仅用于确认本人操作；不落库、不回显
+        newPassword:
+          type: string
+          minLength: 8
+          maxLength: 64
+          nullable: true
+          writeOnly: true
+          description: 新密码，8~64 位且同时含字母与数字；服务端只保存 BCrypt 哈希
+        reason: { type: string, maxLength: 500, nullable: true }
+
+    ProfileRequestHandleReq:
+      type: object
+      additionalProperties: false
+      required: [approved]
+      properties:
+        approved: { type: boolean }
+        note: { type: string, maxLength: 500, nullable: true, description: 驳回时必填 }
+
+    ProfileRequest:
+      type: object
+      properties:
+        id: { type: integer, format: int64 }
+        teacherId: { type: integer, format: int64 }
+        teacherNo: { type: string, description: 教师当前登录用户名，不是申请值 }
+        teacherName: { type: string, description: 教师当前姓名，不是申请值 }
+        oldUsername: { type: string, nullable: true, description: 提交时刻的登录用户名快照 }
+        oldName: { type: string, nullable: true }
+        oldDepartment: { type: string, nullable: true }
+        oldTitle: { type: string, nullable: true }
+        newUsername: { type: string, nullable: true, description: 申请的新登录用户名；null 表示未申请 }
+        newName: { type: string, nullable: true }
+        newDepartment: { type: string, nullable: true }
+        newTitle: { type: string, nullable: true }
+        passwordChange: { type: boolean, description: 是否申请重置密码；任何情况下都不返回哈希 }
+        reason: { type: string, nullable: true }
+        status: { type: string, enum: [PENDING, APPROVED, REJECTED, WITHDRAWN] }
+        reviewNote: { type: string, nullable: true }
+        reviewerUsername: { type: string, nullable: true }
+        reviewedAt: { type: string, format: date-time, nullable: true }
+        createdAt: { type: string, format: date-time }
+
+    ProfileRequestResp:
+      allOf:
+        - $ref: '#/components/schemas/Result'
+        - type: object
+          properties:
+            data: { $ref: '#/components/schemas/ProfileRequest' }
+
+    ProfileRequestPageResp:
+      allOf:
+        - $ref: '#/components/schemas/Result'
+        - type: object
+          properties:
+            data:
+              allOf:
+                - $ref: '#/components/schemas/PageMeta'
+                - type: object
+                  properties:
+                    items: { type: array, items: { $ref: '#/components/schemas/ProfileRequest' } }
 
     # ---------- 授权范围 ----------
     Scope:

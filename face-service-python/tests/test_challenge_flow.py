@@ -154,33 +154,31 @@ def test_baseline_pollution_multi_face_rejected(service, face_img):
         service.start(ticket, two)
 
 
-def test_baseline_missing_degrades(service, face_img):
-    """基线无脸 → 降级为序列首帧（baselineDegraded=True），链路照常走完。"""
-    ticket = tickets.issue(1, 107, "jti-degrade")
-    blank = np.full((720, 1280, 3), 90, dtype=np.uint8)
-    info = service.start(ticket, blank)
-    assert info["baselineDegraded"] is True
+def test_start_rejects_blank_baseline(service):
+    """基线无脸 → FA-4001（NoFace），不抽一个注定失败的动作。
 
-    cid = info["challengeId"]
-    for seq in range(6):
-        service.frame(cid, composite(face_img), seq=seq)
-    result = service.finish(cid)
-    assert result["baselineDegraded"] is True
-    assert result["frames"] == 6
-    # 降级后基线取自首帧，静态序列的动作门禁依然失败
-    assert result["gates"]["actionCount"]["passed"] is False
+    CR-018 后白名单只剩尺度动作，判据是「相对基线的变化」：没有基线时
+    抽到哪个都必然判失败，让学生跑完一轮再收「动作次数不足」是把系统侧
+    问题转嫁给他。回滚嘴部动作后本用例应恢复为「降级为首帧」。
+    """
+    blank = np.full((720, 1280, 3), 90, dtype=np.uint8)
+    with pytest.raises(NoFace):
+        service.start(tickets.issue(1, 107, "jti-degrade"), blank)
 
 
 # ---------------- 尺度类动作：靠近 / 离远 ----------------
 
 
-def test_scale_action_never_picked_without_baseline(service):
-    """基线帧没有人脸时不得抽到尺度类动作：它们的判据是「相对基线的变化」，
-    没有基线就必然判失败，等于让学生替我们重来一次。"""
-    blank = np.full((720, 1280, 3), 90, dtype=np.uint8)
-    for i in range(8):
-        info = service.start(tickets.issue(1, 110 + i, f"jti-nb-{i}"), blank)
-        assert info["action"] not in ("MOVE_CLOSER", "MOVE_AWAY")
+def test_random_pick_only_whitelisted_actions(service, face_img):
+    """CR-018/021：抽样只出白名单里的动作，已停用的嘴部动作不得再被抽到。"""
+    base = composite(face_img)
+    picked = set()
+    for i in range(12):
+        info = service.start(tickets.issue(1, 110 + i, f"jti-pick-{i}"), base)
+        picked.add(info["action"])
+    assert picked <= {"MOVE_CLOSER", "MOVE_AWAY", "EYE_CLOSE",
+                      "TURN_LEFT", "TURN_RIGHT"}, picked
+    assert picked, "12 次抽样至少应抽出一个动作"
 
 
 def test_move_closer_passes_action_gate(service, face_img, monkeypatch):
@@ -252,4 +250,109 @@ def test_unknown_action_hint_rejected(service, face_img, monkeypatch):
     monkeypatch.setattr(settings.action, "allow_action_hint", True)
     with pytest.raises(ValueError):
         service.start(tickets.issue(1, 123, "jti-bad"), composite(face_img),
-                      action_hint="TURN_LEFT")
+                      action_hint="NOD")
+
+
+@pytest.mark.parametrize("retired", ["MOUTH_ONCE", "MOUTH_TWICE", "BLINK"])
+def test_retired_action_hint_rejected(service, face_img, monkeypatch, retired):
+    """CR-018 停用的嘴部动作码、CR-021 被闭眼取代的 BLINK 都要给明确原因。
+
+    验收脚本最容易踩这个坑：以为 hint 写错，去翻白名单和环境变量。
+    """
+    from app.config import settings
+    monkeypatch.setattr(settings.action, "allow_action_hint", True)
+    with pytest.raises(ValueError, match="已停用"):
+        service.start(tickets.issue(1, 124, "jti-retired"), composite(face_img),
+                      action_hint=retired)
+
+
+# ---------------- CR-021：闭眼 / 左右转头 ----------------
+
+def test_eye_close_counter_counts_segment():
+    from app.challenge.action import EyeCloseCounter
+    c = EyeCloseCounter(base_ratio=0.25, abs_drop=0.06, drop_ratio=0.60, hold_frames=2)
+    for r in (0.25, 0.26, 0.05, 0.05, 0.24, 0.25):
+        c.observe(r)
+    assert c.result()[0] == 1
+
+
+def test_eye_close_needs_two_frames():
+    """单帧闭眼 = 眨眼，不算「闭眼保持」；这正是 4fps 下眨眼判不过的原因。"""
+    from app.challenge.action import EyeCloseCounter
+    c = EyeCloseCounter(base_ratio=0.25, hold_frames=2)
+    for r in (0.25, 0.05, 0.25):
+        c.observe(r)
+    assert c.result()[0] == 0
+
+
+def test_eye_close_baseline_self_heals():
+    """基线帧正好拍在闭眼上 → 用序列最高值重算（与张嘴的自愈同构）。"""
+    from app.challenge.action import EyeCloseCounter
+    c = EyeCloseCounter(base_ratio=0.05, hold_frames=2)
+    for r in (0.05, 0.26, 0.27, 0.05, 0.05):
+        c.observe(r)
+    assert c.result()[0] == 1
+
+
+def test_turn_counter_is_directional():
+    from app.challenge.action import TurnActionCounter
+    left = TurnActionCounter(base_yaw=-0.03, direction=1, delta=0.12, hold_frames=2)
+    right = TurnActionCounter(base_yaw=-0.03, direction=-1, delta=0.12, hold_frames=2)
+    for y in (-0.03, -0.02, 0.10, 0.11, -0.03):
+        left.observe(y)
+        right.observe(y)
+    assert left.result()[0] == 1
+    assert right.result()[0] == 0, "同一个序列不能被相反方向也算成做到了"
+
+
+def _state(action: str, **kw) -> "object":
+    from app.challenge.store import ChallengeState
+    base = dict(challenge_id="c-test", session_id=1, student_id=1, ticket_jti="jti",
+                action=action, need=1, window_ms=2500, min_frames=8, created_ms=0,
+                baseline_ratio=0.1, baseline_degraded=False)
+    base.update(kw)
+    return ChallengeState(**base)
+
+
+def test_turn_gate_counts_left_turn():
+    from app.challenge import gates
+    st = _state("TURN_LEFT", baseline_yaw=-0.03,
+                yaws=[-0.03, -0.03, 0.11, 0.12, -0.02])
+    g, detected, _ = gates.gate_action(st)
+    assert detected == 1 and g.passed
+
+
+def test_turn_gate_rejects_static_sequence():
+    from app.challenge import gates
+    st = _state("TURN_RIGHT", baseline_yaw=-0.03, yaws=[-0.03, -0.04, -0.02, -0.03])
+    g, detected, _ = gates.gate_action(st)
+    assert detected == 0 and not g.passed
+
+
+def test_eye_gate_counts_closed_segment():
+    from app.challenge import gates
+    st = _state("EYE_CLOSE", baseline_eye=0.25, eyes=[0.25, 0.26, 0.05, 0.05, 0.25])
+    g, detected, _ = gates.gate_action(st)
+    assert detected == 1 and g.passed
+
+
+def test_eye_close_not_eligible_without_headroom(face_img):
+    """基线眼区太暗就没有下降空间：该动作退出抽签，而不是判学生失败。"""
+    from app.challenge.service import ChallengeService
+    from app.engine import detector
+    frame = composite(face_img)
+    face = detector().detect_largest(frame)
+    assert face is not None
+    assert not ChallengeService._action_eligible("EYE_CLOSE", face, frame, 0.1, 0.05, 0.0)
+    assert ChallengeService._action_eligible("EYE_CLOSE", face, frame, 0.1, 0.25, 0.0)
+
+
+def test_new_action_instructions_and_windows(service, face_img, monkeypatch):
+    """文案与窗口是契约的一部分：闭眼不是眨眼、转头要报方向。"""
+    from app.config import settings
+    monkeypatch.setattr(settings.action, "allow_action_hint", True)
+    base = composite(face_img)
+    eye = service.start(tickets.issue(1, 130, "jti-eye"), base, action_hint="EYE_CLOSE")
+    assert "闭" in eye["instruction"] and eye["windowMs"] == 3000
+    right = service.start(tickets.issue(1, 131, "jti-turn"), base, action_hint="TURN_RIGHT")
+    assert "右边" in right["instruction"] and right["windowMs"] == 2500

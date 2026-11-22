@@ -25,20 +25,37 @@ PREFIX = "fa:challenge:"
 
 # 尺度类动作：判据是检测框尺度，不是嘴区暗度（见 challenge/action.py）
 SCALE_ACTIONS = ("MOVE_CLOSER", "MOVE_AWAY")
+# 转头（CR-021）：判据是 SCRFD 5 点算出的偏航代理
+TURN_ACTIONS = ("TURN_LEFT", "TURN_RIGHT")
+# 转向：+1 = 向左（偏航代理增大）。符号来源见 action.yaw_proxy 的说明。
+TURN_DIRECTIONS = {"TURN_LEFT": 1, "TURN_RIGHT": -1}
+# 闭眼（CR-021）：判据是眼框暗像素占比下降
+EYE_ACTIONS = ("EYE_CLOSE",)
+# 不依赖任何基线的动作（只有已停用的嘴部动作属于这一类，回滚时才会出现在白名单里）。
+# start 用它决定「基线无脸」到底该拒绝还是降级。
+BASELINE_FREE_ACTIONS = ("MOUTH_ONCE", "MOUTH_TWICE")
 
+# CR-018：MOUTH_* 已停用（不再抽签、不接受 hint）。这两张表保留四个键，
+# 一是回滚只需改 FA_ACTION_WHITELIST，二是 Redis 里未过期的存量 challenge 仍能反序列化。
 ACTION_WINDOW = {
     "MOUTH_ONCE": settings.action.window_ms_once,
     "MOUTH_TWICE": settings.action.window_ms_twice,
     "MOVE_CLOSER": settings.action.window_ms_scale,
     "MOVE_AWAY": settings.action.window_ms_scale,
+    "EYE_CLOSE": settings.action.window_ms_eye,
+    "TURN_LEFT": settings.action.window_ms_turn,
+    "TURN_RIGHT": settings.action.window_ms_turn,
 }
 
-# 每个动作要完成几次。靠近/离远做一次就够——「连续靠近两次」没有物理意义。
+# 每个动作要完成几次。靠近/离远/闭眼/转头做一次就够——「连续靠近两次」没有物理意义。
 ACTION_NEED = {
     "MOUTH_ONCE": 1,
     "MOUTH_TWICE": 2,
     "MOVE_CLOSER": 1,
     "MOVE_AWAY": 1,
+    "EYE_CLOSE": 1,
+    "TURN_LEFT": 1,
+    "TURN_RIGHT": 1,
 }
 
 
@@ -50,7 +67,7 @@ class ChallengeState:
     session_id: int
     student_id: int
     ticket_jti: str
-    action: str                      # MOUTH_ONCE / MOUTH_TWICE / MOVE_CLOSER / MOVE_AWAY
+    action: str                      # MOVE_* / EYE_CLOSE / TURN_LEFT / TURN_RIGHT
     need: int                        # 需要完成的动作次数
     window_ms: int
     min_frames: int
@@ -62,6 +79,17 @@ class ChallengeState:
     # 尺度类动作（靠近/离远）的每帧人脸尺度；默认 0 表示旧状态没有这个字段
     baseline_scale: float = 0.0
     scales: list[float] = field(default_factory=list)
+    # 闭眼（CR-021）：基线眼框暗度 + 每帧值 + 两只眼框（192 空间，8 个整数）
+    baseline_eye: float = 0.0
+    eyes: list[float] = field(default_factory=list)
+    eye_roi: list[int] = field(default_factory=list)
+    # 转头（CR-021）：基线偏航代理 + 每帧代理 + 序列里最正脸那一帧的特征。
+    # 末帧可能是侧脸，拿它做 1:N 是自伤（similarity 掉下去 → 误判 FA-4002），
+    # 所以额外记一帧"离基线偏航最近"的特征，finish 时优先用它。
+    baseline_yaw: float = 0.0
+    yaws: list[float] = field(default_factory=list)
+    frontal_emb: list[float] = field(default_factory=list)
+    frontal_dev: float = 9.9
     closed: bool = False             # 已 finish（无论成败），防止重复提交
     no_face_run: int = 0             # 连续无脸帧数
     multi_face_run: int = 0          # 连续多脸帧数
@@ -90,7 +118,8 @@ class ChallengeStore:
 
     def create(self, session_id: int, student_id: int, ticket_jti: str,
                action: str, baseline_ratio: float, baseline_degraded: bool,
-               baseline_scale: float = 0.0) -> ChallengeState:
+               baseline_scale: float = 0.0, baseline_eye: float = 0.0,
+               baseline_yaw: float = 0.0) -> ChallengeState:
         cid = f"c_{uuid.uuid4().hex[:10]}"
         st = ChallengeState(
             challenge_id=cid,
@@ -105,6 +134,8 @@ class ChallengeStore:
             baseline_ratio=baseline_ratio,
             baseline_degraded=baseline_degraded,
             baseline_scale=baseline_scale,
+            baseline_eye=baseline_eye,
+            baseline_yaw=baseline_yaw,
         )
         self.redis.set(self._key(cid), json.dumps(asdict(st)),
                        ex=settings.challenge.ttl_sec)

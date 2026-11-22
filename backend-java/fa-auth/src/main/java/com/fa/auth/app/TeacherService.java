@@ -8,10 +8,12 @@ import com.fa.auth.domain.Account;
 import com.fa.auth.domain.Teacher;
 import com.fa.auth.infra.AccountMapper;
 import com.fa.auth.infra.TeacherMapper;
+import com.fa.auth.security.AccountRoleResolver;
 import com.fa.common.api.PageQuery;
 import com.fa.common.api.PageResult;
 import com.fa.common.error.BizException;
 import com.fa.common.error.ErrorCode;
+import com.fa.common.security.CurrentUser;
 import com.fa.common.security.SecurityUtils;
 import com.fa.infra.audit.AuditWriter;
 import java.util.ArrayList;
@@ -19,6 +21,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -34,16 +37,39 @@ public class TeacherService {
     private final TeacherMapper teacherMapper;
     private final AccountMapper accountMapper;
     private final AccountFactory accountFactory;
+    private final PasswordEncoder passwordEncoder;
     private final AuditWriter audit;
     private final JdbcTemplate jdbc;
+    /** 停用/删除/重置密码后立刻让鉴权侧丢掉旧缓存，不必等 30 秒 TTL。 */
+    private final AccountRoleResolver roleResolver;
 
     public TeacherService(TeacherMapper teacherMapper, AccountMapper accountMapper,
-                          AccountFactory accountFactory, AuditWriter audit, JdbcTemplate jdbc) {
+                          AccountFactory accountFactory, PasswordEncoder passwordEncoder,
+                          AuditWriter audit, JdbcTemplate jdbc,
+                          AccountRoleResolver roleResolver) {
         this.teacherMapper = teacherMapper;
         this.accountMapper = accountMapper;
         this.accountFactory = accountFactory;
+        this.passwordEncoder = passwordEncoder;
         this.audit = audit;
         this.jdbc = jdbc;
+        this.roleResolver = roleResolver;
+    }
+
+    /**
+     * 教师查看自己的档案（含院系/职称）。「我的资料」页需要这两个字段，
+     * 而 /auth/me 的 profile 只带姓名——不去扩大登录态载荷，单独开一个只读口。
+     */
+    public TeacherDtos.Resp self() {
+        CurrentUser user = SecurityUtils.current();
+        if (user.teacherId() == null) {
+            throw new BizException(ErrorCode.FORBIDDEN, "只有教师账号有教师档案");
+        }
+        Teacher teacher = teacherMapper.selectById(user.teacherId());
+        if (teacher == null) {
+            throw new BizException(ErrorCode.NOT_FOUND, "教师档案不存在");
+        }
+        return toRespList(List.of(teacher)).get(0);
     }
 
     public PageResult<TeacherDtos.Resp> list(PageQuery query, String keyword) {
@@ -99,25 +125,50 @@ public class TeacherService {
             throw new BizException(ErrorCode.NOT_FOUND, "教师不存在");
         }
         if (req.name() != null) {
-            teacher.setName(req.name());
+            teacher.setName(req.name().trim());
         }
+        // 空串 = 清空：JSON 里 null 与"没传"不可区分，只能用空串表达清空
         if (req.department() != null) {
-            teacher.setDepartment(req.department());
+            teacher.setDepartment(blankToNull(req.department()));
         }
         if (req.title() != null) {
-            teacher.setTitle(req.title());
+            teacher.setTitle(blankToNull(req.title()));
         }
+
+        Account account = teacher.getAccountId() == null
+                ? null : accountMapper.selectById(teacher.getAccountId());
+        boolean accountDirty = false;
+        boolean passwordReset = false;
+
         if (req.status() != null) {
             teacher.setStatus(req.status());
             // 教师停用要同时停用账号，否则仍能登录拿到令牌
-            Account account = accountMapper.selectById(teacher.getAccountId());
             if (account != null) {
                 account.setStatus("ACTIVE".equals(req.status()) ? "ACTIVE" : "DISABLED");
-                accountMapper.updateById(account);
+                accountDirty = true;
             }
         }
+        // 管理员直接重置密码：教师忘了密码时，申请链路走不通（填不出当前密码），
+        // 这条是兜底入口。与审核通过一样 cv+1，让旧令牌立刻失效。
+        if (req.password() != null && !req.password().isBlank()) {
+            if (account == null) {
+                throw new BizException(ErrorCode.NOT_FOUND, "教师账号不存在");
+            }
+            account.setPasswordHash(passwordEncoder.encode(req.password()));
+            int version = account.getCredentialVersion() == null ? 0 : account.getCredentialVersion();
+            account.setCredentialVersion(version + 1);
+            accountDirty = true;
+            passwordReset = true;
+        }
+        if (accountDirty) {
+            accountMapper.updateById(account);
+            roleResolver.invalidate(account.getId());
+        }
+
         teacherMapper.updateById(teacher);
-        audit.write("TEACHER_UPDATE", "TEACHER", id, "编辑教师 " + teacher.getTeacherNo());
+        audit.write("TEACHER_UPDATE", "TEACHER", id,
+                "编辑教师 " + teacher.getTeacherNo()
+                        + (passwordReset ? "（已重置登录密码，旧会话已失效）" : ""));
         return toRespList(List.of(teacher)).get(0);
     }
 
@@ -137,6 +188,7 @@ public class TeacherService {
         teacherMapper.deleteById(id);
         if (teacher.getAccountId() != null) {
             accountMapper.deleteById(teacher.getAccountId());
+            roleResolver.invalidate(teacher.getAccountId());
         }
         audit.write("TEACHER_DELETE", "TEACHER", id, "删除教师 " + teacher.getTeacherNo());
     }
@@ -145,6 +197,10 @@ public class TeacherService {
         if (!SecurityUtils.current().isAdmin()) {
             throw new BizException(ErrorCode.FORBIDDEN);
         }
+    }
+
+    private String blankToNull(String value) {
+        return value == null || value.isBlank() ? null : value.trim();
     }
 
     private List<TeacherDtos.Resp> toRespList(List<Teacher> records) {

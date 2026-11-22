@@ -8,11 +8,13 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
+import uuid
 
 import streamlit as st
 
 from app.auth.sso import exchange_code
 from app.config import settings
+from app.history import HistoryStore
 from app.session import AgentSession
 from app.tools.catalog import ToolError
 from app.tools.registry import ToolClient
@@ -24,6 +26,10 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 log = logging.getLogger(__name__)
 
 st.set_page_config(page_title="智能助手 · 人脸签到", page_icon="🎓", layout="wide")
+
+_history = HistoryStore(settings.history_url,
+                        ttl_sec=settings.history_ttl_sec,
+                        max_convs=settings.history_max_convs)
 
 
 def _bootstrap_identity() -> bool:
@@ -48,7 +54,7 @@ def _bootstrap_identity() -> bool:
     if ask:
         st.session_state["auto_prompt"] = ask if isinstance(ask, str) else ask[0]
     st.session_state["session"] = AgentSession(
-        data["token"], data["profile"], st.session_state.setdefault("conv", None)
+        data["token"], data["profile"], st.session_state.setdefault("conv", uuid.uuid4().hex[:12])
     )
     return True
 
@@ -69,11 +75,22 @@ def main() -> None:
     user = st.session_state["user"]
     session = _ensure_session()
     messages: list[dict] = st.session_state.setdefault("messages", [])
+    conv: str = st.session_state.get("conv") or uuid.uuid4().hex[:12]
+    st.session_state["conv"] = conv
+    account_id = int(user.get("accountId", 0))
 
     if not settings.llm_enabled:
         st.warning("未配置模型（LLM_API_KEY），自由问答不可用。下面的快捷问句仍然可以使用。")
 
-    render_sidebar(user, on_quick=None, on_reset=_reset)
+    render_sidebar(
+        user,
+        on_quick=None,
+        on_reset=_reset,
+        history_convs=_history.list_convs(account_id),
+        current_conv=conv,
+        on_open_history=_open_history,
+        on_delete_history=_delete_history,
+    )
 
     render_history(messages)
 
@@ -86,6 +103,7 @@ def main() -> None:
                 result = session.resume(decision)
             st.session_state["pending"] = None
             _append_result(messages, result)
+            _history.save(account_id, conv, messages)
             st.rerun()
 
     if st.session_state.get("last_action_log_id") and not pending:
@@ -104,12 +122,32 @@ def main() -> None:
         with st.spinner("查询中…"):
             result = session.ask(prompt, forced=st.session_state.pop("quick_forced", None))
         _append_result(messages, result)
+        _history.save(account_id, conv, messages)
         st.rerun()
 
 
-def _reset() -> None:
-    import uuid
+def _open_history(conv_id: str) -> None:
+    """点侧栏历史会话：恢复消息记录并重建指向原 thread 的会话，可继续追问。"""
+    user = st.session_state.get("user") or {}
+    account_id = int(user.get("accountId", 0))
+    st.session_state["conv"] = conv_id
+    st.session_state["messages"] = _history.load(account_id, conv_id)
+    st.session_state["pending"] = None
+    st.session_state["last_action_log_id"] = None
+    st.session_state["session"] = AgentSession(
+        st.session_state["token"], user, conv_id
+    )
 
+
+def _delete_history(conv_id: str) -> None:
+    user = st.session_state.get("user") or {}
+    account_id = int(user.get("accountId", 0))
+    _history.delete(account_id, conv_id)
+    if st.session_state.get("conv") == conv_id:
+        _reset()
+
+
+def _reset() -> None:
     st.session_state["conv"] = uuid.uuid4().hex[:12]
     st.session_state["messages"] = []
     st.session_state["pending"] = None
@@ -122,7 +160,9 @@ def _reset() -> None:
 def _append_result(messages: list[dict], result: dict) -> None:
     if result.get("answer"):
         messages.append({"role": "assistant", "content": result["answer"],
-                         "citations": result.get("citations") or []})
+                         "citations": result.get("citations") or [],
+                         # 导出文件挂在产生它的那条消息上；历史恢复后按钮仍然可用
+                         "attachments": result.get("attachments") or []})
     if result.get("pending"):
         st.session_state["pending"] = result["pending"]
     if result.get("action_log_id"):

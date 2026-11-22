@@ -1,6 +1,8 @@
 package com.fa.checkin.app;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotEquals;
 
 import com.fa.checkin.api.dto.AttendanceDtos;
 import java.io.ByteArrayInputStream;
@@ -37,7 +39,7 @@ class AttendanceExportXlsxTest {
                 absent ? null : 0.99,
                 absent ? null : 0.98,
                 absent ? null : 2,
-                absent ? null : "MOUTH_ONCE",
+                absent ? null : "MOVE_CLOSER",
                 null, "", null);
     }
 
@@ -51,16 +53,50 @@ class AttendanceExportXlsxTest {
             XSSFSheet sheet = wb.getSheetAt(0);
             assertEquals("考勤记录", wb.getSheetName(0));
             assertEquals("学号", sheet.getRow(0).getCell(0).getStringCellValue());
-            assertEquals("调整原因", sheet.getRow(0).getCell(10).getStringCellValue());
+            assertEquals("调整原因", sheet.getRow(0).getCell(7).getStringCellValue());
 
             assertNotHighlighted(sheet.getRow(1));   // 张三 PRESENT
             assertHighlighted(sheet.getRow(2));      // 李四 ABSENT
             assertNotHighlighted(sheet.getRow(3));   // 王五 LATE
 
-            // 正常行数值列为数值；缺勤行数值列留空但仍带样式（整行高亮）
-            assertEquals(0.9876, sheet.getRow(1).getCell(7).getNumericCellValue(), 1e-9);
-            assertEquals(CellType.BLANK, sheet.getRow(2).getCell(7).getCellType());
+            // 缺勤行签到时间留空但仍带样式（整行高亮）；状态列不受影响
+            assertEquals(CellType.BLANK, sheet.getRow(2).getCell(6).getCellType());
             assertEquals("ABSENT", sheet.getRow(2).getCell(5).getStringCellValue());
+            assertEquals("PRESENT", sheet.getRow(1).getCell(5).getStringCellValue());
+        }
+    }
+
+    /**
+     * 人脸分值三列（相似度/活体/身份）不得出现在导出文件里。
+     *
+     * <p>这不是「顺手删掉」：分值是排障与申诉裁定的内部依据，进了教师/教务的表就会被
+     * 当成判定签到是否有效的概率。行数据里三项都有值，断言的是「有值也不写出去」。
+     */
+    @Test
+    void faceScoresAreNotExported() throws IOException {
+        byte[] bytes = AttendanceQueryService.toXlsx(List.of(
+                row(11, "2025001", "张三", "PRESENT")));
+        try (XSSFWorkbook wb = new XSSFWorkbook(new ByteArrayInputStream(bytes))) {
+            XSSFSheet sheet = wb.getSheetAt(0);
+            XSSFRow head = sheet.getRow(0);
+            assertEquals(8, head.getLastCellNum(), "导出应只有 8 列");
+            for (int i = 0; i < head.getLastCellNum(); i++) {
+                String title = head.getCell(i).getStringCellValue();
+                assertFalse(title.contains("相似"), "第 " + i + " 列不应是相似度：" + title);
+                assertFalse(title.contains("活体"), "第 " + i + " 列不应是活体：" + title);
+                assertFalse(title.contains("身份"), "第 " + i + " 列不应是身份：" + title);
+            }
+            // 数据行同理：列数一致；除「签到时间」是日期序列号（本来就以数值存储）外，
+            // 其余列都不该是数值——三个分值若被写出去，必然落在某一列的小数单元格里。
+            XSSFRow data = sheet.getRow(1);
+            assertEquals(8, data.getLastCellNum());
+            for (int i = 0; i < data.getLastCellNum(); i++) {
+                if (i == 6) {
+                    continue;
+                }
+                assertNotEquals(CellType.NUMERIC, data.getCell(i).getCellType(),
+                        "第 " + i + " 列不应是数值型（分值为小数）");
+            }
         }
     }
 

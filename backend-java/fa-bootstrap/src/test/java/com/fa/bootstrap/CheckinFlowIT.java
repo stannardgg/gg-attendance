@@ -123,7 +123,7 @@ class CheckinFlowIT extends ItBase {
         Map<String, Object> body = Map.of(
                 "sessionId", sid, "studentId", s1, "similarity", 0.9123,
                 "livenessMedian", 0.99, "identitySim", 0.97,
-                "actionCount", 1, "actionSeq", "MOUTH_ONCE");
+                "actionCount", 1, "actionSeq", "MOVE_CLOSER");
         ResponseEntity<JsonNode> commit = internalPost("/internal/checkin/commit", body);
         assertThat(commit.getStatusCode().value()).isEqualTo(200);
         assertThat(commit.getBody().path("data").path("status").asText()).isIn("PRESENT", "LATE");

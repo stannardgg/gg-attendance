@@ -24,8 +24,13 @@ class AgentState(TypedDict, total=False):
     # 编排
     plan: list[dict[str, Any]]
     steps: int
+    # planner 的收尾信号：这一步执行完之后还有没有下一步。见 verify.py
+    planning_done: bool
     tool_results: list[dict[str, Any]]
     citations: list[dict[str, Any]]
+    # 工具生成的文件（目前只有 export_attendance）。base64 由 UI 层渲染下载按钮，
+    # 不参与回答正文，也不进 citations，否则「数据来源」会变成一屏乱码。
+    attachments: list[dict[str, Any]]
 
     # 写操作
     pending: dict[str, Any] | None
@@ -51,6 +56,7 @@ def new_state(query: str, token: str, user: dict[str, Any],
         steps=0,
         tool_results=[],
         citations=[],
+        attachments=[],
         pending=None,
         last_action_log_id=None,
         undoable_until=None,

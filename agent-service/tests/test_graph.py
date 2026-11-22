@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import base64
+import datetime as dt
+
 import pytest
 
+from app.graph.common import today
 from app.session import AgentSession
 from app.tools.catalog import ToolError
 
@@ -131,6 +135,87 @@ def test_commit_expired_token_message(patch_graph, fake_tools, user):
     assert "过期" in out["answer"]
 
 
+class _FakeResolver:
+    """名称解析替身：真实实现要访问 Java，这里只验"名称→id"之后的编排。"""
+
+    classes = [{"id": 28, "code": "1234", "name": "大数据1班"}]
+    courses = [{"id": 16, "code": "E2K600C45", "name": "高等数学"}]
+
+    def __init__(self, token: str) -> None:
+        self.token = token
+
+    def all_classes(self):
+        return list(self.classes)
+
+    def all_courses(self):
+        return list(self.courses)
+
+
+def test_create_session_resolves_alias_names(patch_graph, fake_tools, user, monkeypatch):
+    """「大数据一班 + 高数课程」要落到正确 id 上。
+
+    名称认错不是文案问题，是给别的班发签到的数据问题——所以断言的是工具参数。
+    """
+    import app.graph.nodes.planner as planner_mod
+
+    monkeypatch.setattr(planner_mod, "NameResolver", _FakeResolver)
+    _session(user).ask("给大数据一班高数课程发起签到")
+
+    assert fake_tools.calls[0]["tool"] == "draft_session"
+    assert fake_tools.calls[0]["params"] == {"classId": 28, "courseId": 16}
+
+
+def test_two_step_create_reaches_confirm_card(patch_graph, fake_tools, user, monkeypatch):
+    """draft → create 必须真的走到确认卡。
+
+    旧行为：tools 节点跑完一步后 `plan` 已空，verify 直接去 answer，
+    于是只回一句「应到 40 人」，确认卡永远出不来——发起签到等于没实现。
+    """
+    import app.graph.nodes.planner as planner_mod
+
+    monkeypatch.setattr(planner_mod, "NameResolver", _FakeResolver)
+    fake_tools.responses["draft_session"] = {
+        "result": {"className": "大数据1班", "courseName": "高等数学", "expectedCount": 40},
+    }
+    fake_tools.responses["create_session"] = {
+        "requiresConfirm": True, "confirmToken": "tk-2", "expiresAt": "2099-01-01T00:00:00",
+        "preview": {"actionLabel": "发起一场签到", "resourceLabel": "大数据1班 × 高等数学",
+                    "affectedCount": 40, "undoable": True},
+    }
+    out = _session(user).ask("给大数据一班高数课程发起签到")
+
+    assert [c["tool"] for c in fake_tools.calls] == ["draft_session", "create_session"]
+    assert fake_tools.calls[1]["params"]["classId"] == 28
+    assert fake_tools.calls[1]["params"]["title"] == "大数据1班 × 高等数学 签到"
+    assert out["pending"]["preview"]["affectedCount"] == 40
+
+
+def test_bare_class_plus_checkin_also_creates(patch_graph, fake_tools, user, monkeypatch):
+    """省略动词的「大数据1班高数签到」也走发起。
+
+    聊天框里最常见的省略说法。认错的代价是点多一次「取消」，
+    而认不出来就是"发消息没有任何反应"——后者更难解释。
+    """
+    import app.graph.nodes.planner as planner_mod
+
+    monkeypatch.setattr(planner_mod, "NameResolver", _FakeResolver)
+    _session(user).ask("大数据1班高数签到")
+
+    assert fake_tools.calls[0]["tool"] == "draft_session"
+    assert fake_tools.calls[0]["params"] == {"classId": 28, "courseId": 16}
+
+
+def test_create_session_reports_missing_object(patch_graph, fake_tools, user, monkeypatch):
+    """库里没有就叫「未存在」，不调任何工具，也不去猜一个最近的班。"""
+    import app.graph.nodes.planner as planner_mod
+
+    monkeypatch.setattr(planner_mod, "NameResolver", _FakeResolver)
+    out = _session(user).ask("给大数据三班发起物理签到")
+
+    assert fake_tools.calls == []
+    assert "未存在" in out["answer"]
+
+
 def test_generic_class_rate_is_not_parsed_as_class_name(patch_graph, fake_tools, user):
     """「本周各班出勤率」里的「本周各」不是班名。
 
@@ -150,3 +235,50 @@ def test_class_rate_still_captures_specific_class():
     assert m is not None
     assert _clean(m.group("cls")) == "计算机 1"
     assert m.group("when") == "这周"
+
+
+def test_export_intent_is_not_parsed_as_student_name(patch_graph, fake_tools, user):
+    """「导出近两天考勤记录」曾被截成 studentName=出近两天。
+
+    规则层一旦命中就轮不到模型纠正，所以这里断言的是工具与参数，
+    不是文案：文案可以改，参数错了就是去查了另一个人。
+    """
+    fake_tools.responses["export_attendance"] = {
+        "requiresConfirm": False,
+        "result": {
+            "fileName": "考勤记录_2026-11-21_2026-11-22.xlsx",
+            "contentType": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "sizeBytes": 2048,
+            "rowCount": 12,
+            "contentBase64": base64.b64encode(b"xlsx-bytes").decode(),
+        },
+    }
+    out = _session(user).ask("导出近两天考勤记录")
+
+    assert [c["tool"] for c in fake_tools.calls] == ["export_attendance"]
+    params = fake_tools.calls[0]["params"]
+    assert "studentName" not in params
+    assert params["dateTo"] == today().isoformat()
+    assert params["dateFrom"] == (today() - dt.timedelta(days=1)).isoformat()
+    assert "未查询到该学生" not in out["answer"]
+
+
+def test_export_reply_exposes_download_attachment(patch_graph, fake_tools, user):
+    payload = base64.b64encode(b"fake-xlsx").decode()
+    fake_tools.responses["export_attendance"] = {
+        "requiresConfirm": False,
+        "result": {
+            "fileName": "考勤记录_2026-11-22.xlsx",
+            "contentType": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "sizeBytes": 9,
+            "rowCount": 3,
+            "contentBase64": payload,
+        },
+    }
+    out = _session(user).ask("导出今天考勤记录")
+
+    assert out["attachments"][0]["contentBase64"] == payload
+    assert out["attachments"][0]["fileName"] == "考勤记录_2026-11-22.xlsx"
+    assert "已生成" in out["answer"] and "3 行" in out["answer"]
+    # 文件体不能留在 tool_results：检查点会每个 super-step 序列化一次
+    assert "contentBase64" not in out["tool_results"][0]["result"]

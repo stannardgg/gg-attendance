@@ -14,6 +14,8 @@ from app.tools.registry import ToolClient
 
 log = logging.getLogger(__name__)
 
+_XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
 
 def tool_node(state: AgentState) -> dict:
     plan = list(state.get("plan") or [])
@@ -27,6 +29,7 @@ def tool_node(state: AgentState) -> dict:
     client = ToolClient(state["token"], int(state["user"]["accountId"]))
     results = list(state.get("tool_results") or [])
     citations = list(state.get("citations") or [])
+    attachments = list(state.get("attachments") or [])
 
     try:
         data = client.invoke(tool, params, tool_call_id=tool_call_id,
@@ -56,15 +59,23 @@ def tool_node(state: AgentState) -> dict:
             },
             "tool_results": results,
             "citations": citations,
+            "attachments": attachments,
         }
 
     result = data.get("result")
+    attachment = _extract_attachment(tool, result)
+    if attachment:
+        # 文件体不进 tool_results：它会被检查点反复序列化、也会被引用格式化逻辑扫到。
+        # 元数据（文件名/行数）留在 result 里供回答使用。
+        result = {k: v for k, v in result.items() if k != "contentBase64"}
+        attachments.append(attachment)
     results.append({"tool": tool, "params": params, "result": result})
     citations.append({"tool": tool, "params": params, "count": _count(result)})
     update = {
         "plan": plan,
         "tool_results": results,
         "citations": citations,
+        "attachments": attachments,
         "pending": None,
     }
     if data.get("actionLogId"):
@@ -73,12 +84,39 @@ def tool_node(state: AgentState) -> dict:
     return update
 
 
+def _extract_attachment(tool: str, result: object) -> dict[str, object] | None:
+    """把工具返回的文件体从 result 里摘出来。
+
+    只有 export_attendance 会带 contentBase64。用白名单判断而不是
+    `if "contentBase64" in result`：别的工具将来若碰巧返回同名字段，
+    也不该被当成可下载文件。
+    """
+    if tool != "export_attendance" or not isinstance(result, dict):
+        return None
+    content = result.get("contentBase64")
+    if not isinstance(content, str) or not content:
+        return None
+    return {
+        "fileName": str(result.get("fileName") or "考勤记录.xlsx"),
+        "mimeType": str(result.get("contentType") or _XLSX_MIME),
+        "contentBase64": content,
+        "rowCount": int(result.get("rowCount") or 0),
+    }
+
+
 def _count(result: object) -> int:
     if isinstance(result, dict):
         for key in ("items", "records", "candidates", "rows"):
             value = result.get(key)
             if isinstance(value, list):
                 return len(value)
+        # found=false 是「查无此人/无记录」，此前落到下面的 return 1，
+        # 引用里就出现「未查询到该学生 … 命中 1 条」这种自相矛盾的行。
+        if result.get("found") is False:
+            return 0
+        # 导出类结果的「命中」就是数据行数，不是 1 个文件。
+        if isinstance(result.get("rowCount"), int):
+            return int(result["rowCount"])
         if "count" in result and isinstance(result["count"], int):
             return int(result["count"])
         return 1

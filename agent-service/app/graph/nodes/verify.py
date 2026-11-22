@@ -17,7 +17,13 @@ def verify(state: AgentState) -> str:
         return "confirm"
     if state.get("plan"):
         return "plan"
-    return "answer"
+    # 一步跑完必须回 planner 再问一次「还有下一步吗」。
+    # 发起签到是两步（draft_session → create_session），
+    # 之前这里直接去 answer，「应到 1 人」说完就没有然后了，确认卡永远出不来。
+    # 会不会空转由 planner 的 `planning_done` 决定：它说没有了就收尾。
+    if state.get("planning_done", True):
+        return "answer"
+    return "plan"
 
 
 def after_route(state: AgentState) -> str:

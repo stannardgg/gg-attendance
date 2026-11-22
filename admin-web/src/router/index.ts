@@ -19,6 +19,12 @@ const routes: RouteRecordRaw[] = [
         component: () => import('@/features/teacher/TeacherView.vue'),
         meta: { roles: ['ADMIN'] }
       },
+      {
+        path: 'profile',
+        name: 'profile',
+        component: () => import('@/features/profile/TeacherProfileView.vue'),
+        meta: { roles: ['TEACHER'] }
+      },
       { path: 'sessions', name: 'sessions', component: () => import('@/features/session/SessionListView.vue') },
       { path: 'sessions/new', name: 'session-new', component: () => import('@/features/session/SessionCreateView.vue') },
       {

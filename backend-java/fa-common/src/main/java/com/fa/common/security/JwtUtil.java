@@ -30,6 +30,17 @@ public class JwtUtil {
     public static final String CLAIM_STUDENT_ID = "studentId";
     public static final String CLAIM_TOKEN_TYPE = "typ";
 
+    /**
+     * 凭据版本（credential version）。账号改密或改登录名时库里 +1，
+     * 旧令牌带的 cv 对不上，鉴权直接 401。
+     *
+     * <p>为什么不复用 Redis 黑名单：登出按 jti 撤销，是"这一张令牌不要了"；
+     * 改密是"这个账号之前签发的全部令牌都不要了"。前者可能因为 Redis 故障
+     * 静默失效，后者是安全底线，必须由数据库这个唯一事实源兜住。
+     * 老令牌上没有这个 claim，按 0 处理 —— 与升级前的默认值一致，不会误杀。
+     */
+    public static final String CLAIM_CREDENTIAL_VERSION = "cv";
+
     public static final String TYPE_ACCESS = "access";
     public static final String TYPE_REFRESH = "refresh";
 
@@ -51,17 +62,19 @@ public class JwtUtil {
     }
 
     public String issueAccess(long accountId, String username, String role,
-                              Long teacherId, Long studentId) {
-        return issue(accountId, username, role, teacherId, studentId, TYPE_ACCESS, accessTtl);
+                              Long teacherId, Long studentId, int credentialVersion) {
+        return issue(accountId, username, role, teacherId, studentId, credentialVersion,
+                TYPE_ACCESS, accessTtl);
     }
 
     public String issueRefresh(long accountId, String username, String role,
-                               Long teacherId, Long studentId) {
-        return issue(accountId, username, role, teacherId, studentId, TYPE_REFRESH, refreshTtl);
+                               Long teacherId, Long studentId, int credentialVersion) {
+        return issue(accountId, username, role, teacherId, studentId, credentialVersion,
+                TYPE_REFRESH, refreshTtl);
     }
 
     private String issue(long accountId, String username, String role, Long teacherId,
-                         Long studentId, String type, Duration ttl) {
+                         Long studentId, int credentialVersion, String type, Duration ttl) {
         Instant now = Instant.now();
         var builder = Jwts.builder()
                 .issuer(ISSUER)
@@ -71,6 +84,7 @@ public class JwtUtil {
                 .expiration(Date.from(now.plus(ttl)))
                 .claim(CLAIM_USERNAME, username)
                 .claim(CLAIM_ROLE, role)
+                .claim(CLAIM_CREDENTIAL_VERSION, credentialVersion)
                 .claim(CLAIM_TOKEN_TYPE, type);
         if (teacherId != null) {
             builder.claim(CLAIM_TEACHER_ID, teacherId);
@@ -124,12 +138,14 @@ public class JwtUtil {
                 ? null : ((Number) claims.get(CLAIM_TEACHER_ID)).longValue();
         Long studentId = claims.get(CLAIM_STUDENT_ID) == null
                 ? null : ((Number) claims.get(CLAIM_STUDENT_ID)).longValue();
+        Number cv = claims.get(CLAIM_CREDENTIAL_VERSION, Number.class);
         return new TokenPayload(
                 Long.parseLong(claims.getSubject()),
                 claims.get(CLAIM_USERNAME, String.class),
                 claims.get(CLAIM_ROLE, String.class),
                 teacherId,
                 studentId,
+                cv == null ? 0 : cv.intValue(),
                 claims.getId(),
                 claims.get(CLAIM_TOKEN_TYPE, String.class));
     }

@@ -35,6 +35,11 @@ export async function login(username: string, password: string): Promise<void> {
 
 export async function loadMe(): Promise<void> {
   if (!getToken()) {
+    // 令牌已不存在（本页登出，或别的标签页登出）：身份必须一起清掉，
+    // 否则菜单还按旧身份渲染，点进去只会收到 401
+    auth.profile = null
+    auth.permissions = []
+    auth.scope = { classIds: [], courseIds: [] }
     auth.ready = true
     return
   }

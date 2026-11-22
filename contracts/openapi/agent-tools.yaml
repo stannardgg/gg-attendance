@@ -1,7 +1,7 @@
 $schema: https://json-schema.org/draft/2020-12/schema
 $id: https://gg-attendance.local/schemas/agent-tools.yaml
 title: Agent 工具契约
-version: 1.0.0
+version: 1.1.0
 frozen: true
 description: |
   **这不是 REST 接口**，是给 LLM function calling 用的工具定义。
@@ -257,6 +257,41 @@ tools:
           sessionTitle: { type: string }
           reason: { type: string }
           at: { type: string, format: date-time }
+
+  - name: export_attendance
+    level: L0
+    title: 导出考勤明细 Excel
+    description: |
+      生成与管理端「导出 Excel」按钮**同一口径**的 .xlsx（缺勤 ABSENT 行整行红底高亮）。
+      只读：不新增、不修改任何记录；调用一次会在 `agent_query_log` 留一条读日志。
+      Agent 拿到 `contentBase64` 后交给界面渲染下载按钮，不改写、不重算。
+    params:
+      type: object
+      additionalProperties: false
+      properties:
+        sessionId: { type: integer, format: int64, description: 单场会话；与日期范围二选一 }
+        classId: { type: integer, format: int64 }
+        courseId: { type: integer, format: int64 }
+        dateFrom: { type: string, format: date }
+        dateTo: { type: string, format: date }
+      anyOf:
+        - required: [sessionId]
+        - required: [dateFrom]
+        - required: [dateTo]
+    returns:
+      type: object
+      properties:
+        fileName: { type: string, description: 例如「考勤记录_2026-11-21_2026-11-22.xlsx」 }
+        contentType:
+          type: string
+          const: application/vnd.openxmlformats-officedocument.spreadsheetml.sheet
+        sizeBytes: { type: integer }
+        rowCount: { type: integer, description: 数据行数（不含表头） }
+        contentBase64: { type: string, description: xlsx 文件的 base64；单次上限约 3MB 原文件 }
+    citation: 命中条数 = rowCount
+    errors:
+      FA-2001: 未给场次或日期范围、dateFrom 晚于 dateTo、或行数超过单次上限
+      FA-6004: classId/courseId 超出数据范围
 
   # ============================ L1 草稿 ============================
   - name: draft_import_students

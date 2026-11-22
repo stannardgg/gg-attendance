@@ -28,6 +28,14 @@ ADMIN_USER = os.environ.get("E2E_ADMIN_USER", "admin")
 ADMIN_PWD = os.environ.get("E2E_ADMIN_PWD", "")
 INTERNAL_TOKEN = os.environ.get("E2E_INTERNAL_TOKEN", "")
 OUT_DIR = os.environ.get("E2E_OUT", "/out")
+# 服务端实际启用的动作码（compose 由 ACTION_WHITELIST 透传）。预检按它决定
+# 要跑哪几族的可测性筛选：回滚张嘴族时不改代码，改 .env 就够了。
+ACTION_WHITELIST = tuple(
+    a.strip() for a in os.environ.get(
+        "E2E_ACTION_WHITELIST",
+        "MOVE_CLOSER,MOVE_AWAY,EYE_CLOSE,TURN_LEFT,TURN_RIGHT").split(",")
+    if a.strip())
+MOUTH_ACTIONS = {"MOUTH_ONCE", "MOUTH_TWICE"}
 
 # 每位「有脸」的学生用一个人：CASIA 目录名。
 # 不能固定用 000/001/002：face 的采集质检有 DUPLICATE 判定（同一张脸不能重复建档），
@@ -70,7 +78,7 @@ def candidates(limit: int = 40):
     for cand in avail:
         if given >= limit:
             break
-        if not _mouth_detectable(cand):
+        if not _action_detectable(cand):
             continue
         given += 1
         used.append(cand)
@@ -78,8 +86,77 @@ def candidates(limit: int = 40):
         yield cand
 
 
+def _action_detectable(person: str) -> bool:
+    """预检：这张脸的合成素材能不能把**当前启用的**动作判出来。
+
+    合成素材是"造出来的动作"，不是真人做的：涂色/缩放能造尺度与闭眼，
+    造不出真实偏航（转头在 E2E 只验负例），所以这里只筛能造正例的两族。
+    筛不掉的代价是验收结果取决于随机分到哪个身份——CR-021 就踩过一次：
+    场景 19 同一套代码，抽到某个身份就红、抽到另一个就绿。
+    """
+    checks = []
+    if "EYE_CLOSE" in ACTION_WHITELIST:
+        checks.append(_eye_detectable)
+    if MOUTH_ACTIONS & set(ACTION_WHITELIST):
+        checks.append(_mouth_detectable)
+    return all(check(person) for check in checks)
+
+
+def _eye_detectable(person: str) -> bool:
+    """预检：这张脸的「合成闭眼」能不能被眼区判据判出来（CR-021）。
+
+    与 `_mouth_detectable` 同一套口径、同一个理由：眼框在基线帧上锁定，之后每帧
+    只做刚性对齐再取那块。不能"每帧重算关键点"去估——涂过的眼睑会把形状回归带偏、
+    ROI 跟着漂，算出来的降幅虚高，预检就会放过实际判不出来的身份。
+
+    另外两条可做性门槛也照抄服务端（`eye_base_min` / `eye_min_iod_px`）：
+    达不到的身份在生产里根本抽不到 EYE_CLOSE，拿它跑场景 19 只能测出"合成素材太弱"。
+    """
+    try:
+        import cv2
+        from app.challenge.action import EyeCloseCounter, eye_dark_ratio, interocular
+        from app.config import settings
+        from app.engine import detector, landmarker
+
+        synth._engine()            # 先把模型加载完，detector()/landmarker() 才不是 None
+        img = cv2.imread(os.path.join(synth.DATASET, person, f"{person}_0.jpg"))
+        if img is None:
+            return False
+        base = synth.composite(img)
+        face = detector().detect_largest(base)
+        if face is None:
+            return False
+        if interocular(face) < settings.action.eye_min_iod_px:
+            return False
+        pts, crop = landmarker().landmarks(base, face.bbox)
+        rects = landmarker().eye_rects(pts)
+        base_ratio = eye_dark_ratio(cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY), rects)
+        if base_ratio < settings.action.eye_base_min:
+            return False
+
+        shut = synth.close_eyes(base)
+        closed = detector().detect_largest(shut)
+        if closed is None:
+            return False
+        aligned = landmarker().align_space(shut, closed.bbox)
+        shut_ratio = eye_dark_ratio(cv2.cvtColor(aligned, cv2.COLOR_BGR2GRAY), rects)
+
+        counter = EyeCloseCounter(
+            base_ratio=base_ratio,
+            abs_drop=settings.action.eye_dark_drop,
+            drop_ratio=settings.action.eye_drop_ratio,
+            hold_frames=settings.action.eye_hold_frames,
+        )
+        # 帧序与 flows.checkin_frames_eye 一致：3 帧睁眼 → 4 帧闭眼 → 余下睁眼
+        for ratio in [base_ratio] * 3 + [shut_ratio] * 4 + [base_ratio] * 3:
+            counter.observe(ratio)
+        return counter.result()[0] >= 1
+    except Exception:                                        # noqa: BLE001
+        return True            # 预检本身出错时不要卡住验收
+
+
 def _mouth_detectable(person: str) -> bool:
-    """预检：这张脸的「合成张嘴」能不能被动作门禁判出来。
+    """预检：这张脸的「合成张嘴」能不能被动作门禁判出来（仅在张嘴族启用时调用）。
 
     20 个身份里有 1 个（唇色偏暗，基线暗度 0.30）涨幅只有 1.36 倍，达不到
     rise_ratio=1.45 —— 那是人脸本身的属性，不是系统行为，先筛掉。

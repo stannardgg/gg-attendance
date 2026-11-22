@@ -139,19 +139,44 @@ public class AttendanceQueryService {
      */
     @DataScope
     public byte[] exportXlsx(Long sessionId, Long classId, Long courseId, LocalDate from, LocalDate to) {
+        return exportXlsxFile(sessionId, classId, courseId, from, to).bytes();
+    }
+
+    /**
+     * 同上，但把行数一并返回。
+     *
+     * <p>Agent 的回答里要写「共 N 行」——不能让它去数字节数或者猜；
+     * 空表也要如实说「范围内没有记录」，而不是给一个 0 字节文件。
+     */
+    @DataScope
+    public ExportFile exportXlsxFile(Long sessionId, Long classId, Long courseId,
+                                     LocalDate from, LocalDate to) {
         Filter f = filter(sessionId, classId, courseId, null, null, from, to);
         String select = sessionId != null ? SELECT_FROM_EXPECTED : SELECT_FROM_ATTENDANCE;
         List<AttendanceDtos.Row> rows = f.blocked() ? List.of()
                 : jdbc.query(select + f.where() + " ORDER BY st.student_no", mapper(), f.args.toArray());
-        return toXlsx(rows);
+        return new ExportFile(toXlsx(rows), rows.size());
     }
 
+    /** 导出结果：文件字节 + 数据行数（不含表头）。 */
+    public record ExportFile(byte[] bytes, int rows) {
+    }
+
+    /**
+     * 导出列：只留「谁来了、谁没来、为什么改状态」。
+     *
+     * <p><b>相似度 / 活体 / 身份三个分值故意不进导出。</b>它们是排障与申诉裁定用的内部指标：
+     * 进了教师、教务手里的表，就会被当成「按概率判定签到是否有效」的依据（出现过拿 0.63
+     * 来质问「为什么这也算签到成功」）；而且分值随模型换版失去可比性，留在文件里等于留下
+     * 一份无法解释的历史数据。管理端列表仍显示这三项——需要看分数的是处理申诉的人，
+     * 不是在 Excel 里对账的人。列上的差异只有这三列，行范围与排序仍与列表完全一致。
+     */
     private static final String[] XLSX_HEADERS = {
-            "学号", "姓名", "班级", "课程", "场次", "状态", "签到时间", "相似度", "活体", "身份", "调整原因"
+            "学号", "姓名", "班级", "课程", "场次", "状态", "签到时间", "调整原因"
     };
 
     /** 列宽（字符数 × 256），手调过：中文表头不换行、原因列够宽。 */
-    private static final int[] XLSX_WIDTHS = {12, 10, 14, 14, 22, 10, 20, 9, 9, 9, 28};
+    private static final int[] XLSX_WIDTHS = {12, 10, 14, 14, 22, 10, 20, 28};
 
     /**
      * 生成工作簿。缺勤行用 Excel「坏值」经典配色：浅红底（ROSE）+ 深红字（DARK_RED）。
@@ -168,11 +193,9 @@ public class AttendanceQueryService {
             headerStyle.setFillPattern(FillPatternType.SOLID_FOREGROUND);
             headerStyle.setAlignment(HorizontalAlignment.CENTER);
 
-            short numFmt = wb.createDataFormat().getFormat("0.0000");
+            // 导出已无小数列（人脸分值不导出，见 XLSX_HEADERS），因此只需要文本与时间两种格式。
             short tsFmt = wb.createDataFormat().getFormat("yyyy-MM-dd HH:mm:ss");
             XSSFCellStyle textStyle = wb.createCellStyle();
-            XSSFCellStyle numStyle = wb.createCellStyle();
-            numStyle.setDataFormat(numFmt);
             XSSFCellStyle tsStyle = wb.createCellStyle();
             tsStyle.setDataFormat(tsFmt);
 
@@ -182,9 +205,6 @@ public class AttendanceQueryService {
             absentText.setFont(absentFont);
             absentText.setFillForegroundColor(IndexedColors.ROSE.getIndex());
             absentText.setFillPattern(FillPatternType.SOLID_FOREGROUND);
-            XSSFCellStyle absentNum = wb.createCellStyle();
-            absentNum.cloneStyleFrom(absentText);
-            absentNum.setDataFormat(numFmt);
             XSSFCellStyle absentTs = wb.createCellStyle();
             absentTs.cloneStyleFrom(absentText);
             absentTs.setDataFormat(tsFmt);
@@ -204,13 +224,13 @@ public class AttendanceQueryService {
             int r = 1;
             for (AttendanceDtos.Row row : rows) {
                 boolean absent = "ABSENT".equals(row.status());
-                // 每 cell 一个样式，样式对象全程只有固定 7 个 —— 绝不能在循环里 createCellStyle，
+                // 每 cell 一个样式，样式对象全程只有固定 4 个 —— 绝不能在循环里 createCellStyle，
                 // 否则超量行会撞上 xlsx 的 64000 样式上限。
                 XSSFCellStyle[] styles = absent
                         ? new XSSFCellStyle[]{absentText, absentText, absentText, absentText,
-                              absentText, absentText, absentTs, absentNum, absentNum, absentNum, absentText}
+                              absentText, absentText, absentTs, absentText}
                         : new XSSFCellStyle[]{textStyle, textStyle, textStyle, textStyle,
-                              textStyle, textStyle, tsStyle, numStyle, numStyle, numStyle, textStyle};
+                              textStyle, textStyle, tsStyle, textStyle};
                 XSSFRow line = sheet.createRow(r++);
                 text(line, 0, row.studentNo(), styles[0]);
                 text(line, 1, row.studentName(), styles[1]);
@@ -225,10 +245,7 @@ public class AttendanceQueryService {
                 } else {
                     line.createCell(6).setCellStyle(styles[6]);
                 }
-                number(line, 7, row.similarity(), styles[7]);
-                number(line, 8, row.livenessMedian(), styles[8]);
-                number(line, 9, row.identitySim(), styles[9]);
-                text(line, 10, row.adjustReason(), styles[10]);
+                text(line, 7, row.adjustReason(), styles[7]);
             }
             wb.write(out);
             return out.toByteArray();
@@ -240,14 +257,6 @@ public class AttendanceQueryService {
     private static void text(XSSFRow row, int col, String value, XSSFCellStyle style) {
         XSSFCell cell = row.createCell(col);
         if (value != null && !value.isEmpty()) {
-            cell.setCellValue(value);
-        }
-        cell.setCellStyle(style);
-    }
-
-    private static void number(XSSFRow row, int col, Double value, XSSFCellStyle style) {
-        XSSFCell cell = row.createCell(col);
-        if (value != null) {
             cell.setCellValue(value);
         }
         cell.setCellStyle(style);

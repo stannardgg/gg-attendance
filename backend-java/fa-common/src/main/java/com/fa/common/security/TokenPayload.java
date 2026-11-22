@@ -10,6 +10,8 @@ public record TokenPayload(
         String role,
         Long teacherId,
         Long studentId,
+        /** 签发时的凭据版本；与库中 account.credential_version 不符即视为失效 */
+        int credentialVersion,
         String jti,
         String tokenType) {
 }

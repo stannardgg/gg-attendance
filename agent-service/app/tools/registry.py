@@ -15,6 +15,7 @@ import httpx
 
 from app.config import settings
 from app.tools.catalog import ToolError, _parse
+from app.tools.naming import NameMatch, pick
 
 log = logging.getLogger(__name__)
 
@@ -83,47 +84,71 @@ class ToolClient:
 
 
 class NameResolver:
-    """把「计算机 2 班」「高等数学」解析成 id。
+    """把「计算机 2 班」「高数」解析成 id。
 
     **为什么要这一层**：§11.4 的工具清单里没有 `list_classes` / `list_courses`，
     但验收要求"说'帮我给计算机 2 班发起高数签到'能出确认卡"。没有名称解析，
     模型只能靠猜 id —— 猜错就是给别的班发了签到。
     这里复用已有的**只读**管理端列表接口做解析，不新增任何写入路径，也不扩权：
     返回的列表本来就被 `teacher_scope` 过滤过。已登记 CR-005，建议把这两个查询补进工具契约。
+
+    **关键词搜不到别名**：管理端是 `LIKE '%高数%'`，而库里叫「高等数学」，
+    一个字符都不连续。所以「先关键词、再全量模糊」两步走，模糊规则见 `naming.py`。
     """
+
+    # 全量扫描的分页上限：教师在 1 页内，管理员课程多时最多 5 页（500 条）
+    _MAX_PAGES = 5
+    _PAGE_SIZE = 100
 
     def __init__(self, user_token: str) -> None:
         self._token = user_token
 
-    def _get(self, path: str, keyword: str) -> list[dict[str, Any]]:
+    def _get(self, path: str, keyword: str = "", page: int = 1) -> list[dict[str, Any]]:
         url = f"{settings.java_base_url}{path}"
+        params: dict[str, Any] = {"page": page, "size": self._PAGE_SIZE, "status": "ACTIVE"}
+        if keyword:
+            params["keyword"] = keyword
         with httpx.Client(timeout=settings.tool_timeout_sec) as client:
-            resp = client.get(
-                url,
-                params={"keyword": keyword, "size": 20, "status": "ACTIVE"},
-                headers={"Authorization": f"Bearer {self._token}"},
-            )
+            resp = client.get(url, params=params, headers={"Authorization": f"Bearer {self._token}"})
         payload = _parse(resp)
         return ((payload.get("data") or {}).get("items")) or []
 
-    def classes(self, keyword: str) -> list[dict[str, Any]]:
+    def _get_all(self, path: str) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        for page in range(1, self._MAX_PAGES + 1):
+            batch = self._get(path, page=page)
+            rows.extend(batch)
+            if len(batch) < self._PAGE_SIZE:
+                break
+        return rows
+
+    def classes(self, keyword: str = "") -> list[dict[str, Any]]:
         return self._get("/api/v1/admin/classes", keyword)
 
-    def courses(self, keyword: str) -> list[dict[str, Any]]:
+    def courses(self, keyword: str = "") -> list[dict[str, Any]]:
         return self._get("/api/v1/admin/courses", keyword)
 
+    def all_classes(self) -> list[dict[str, Any]]:
+        return self._get_all("/api/v1/admin/classes")
+
+    def all_courses(self) -> list[dict[str, Any]]:
+        return self._get_all("/api/v1/admin/courses")
+
     def resolve_class(self, name: str) -> dict[str, Any] | None:
-        return _pick(self.classes(name), name)
+        return self.match_class(name).row
 
     def resolve_course(self, name: str) -> dict[str, Any] | None:
-        return _pick(self.courses(name), name)
+        return self.match_course(name).row
 
+    def match_class(self, name: str) -> NameMatch:
+        """先按关键词搜（快，命中精确写法），搜不到再全量模糊（认「高数」这类简称）。"""
+        hit = pick(self.classes(name), name, "class")
+        if hit.row is not None or hit.candidates:
+            return hit
+        return pick(self.all_classes(), name, "class")
 
-def _pick(rows: list[dict[str, Any]], name: str) -> dict[str, Any] | None:
-    """精确同名优先；否则取唯一包含关系；仍不唯一则返回 None（让上层反问，不许猜）。"""
-    exact = [r for r in rows if r.get("name") == name]
-    if len(exact) == 1:
-        return exact[0]
-    if len(rows) == 1:
-        return rows[0]
-    return None
+    def match_course(self, name: str) -> NameMatch:
+        hit = pick(self.courses(name), name, "course")
+        if hit.row is not None or hit.candidates:
+            return hit
+        return pick(self.all_courses(), name, "course")
