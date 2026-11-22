@@ -86,6 +86,17 @@ def candidates(limit: int = 40):
         yield cand
 
 
+def _wire(frame):
+    """把画面过一遍上传用的编码（`synth.jpeg`，q90）再解码。
+
+    服务端量的是解码后的这一份，预检必须量同一份，否则线上和预检会给出两种结论。
+    """
+    import cv2
+    import numpy as np
+
+    return cv2.imdecode(np.frombuffer(synth.jpeg(frame), np.uint8), cv2.IMREAD_COLOR)
+
+
 def _action_detectable(person: str) -> bool:
     """预检：这张脸的合成素材能不能把**当前启用的**动作判出来。
 
@@ -111,6 +122,10 @@ def _eye_detectable(person: str) -> bool:
 
     另外两条可做性门槛也照抄服务端（`eye_base_min` / `eye_min_iod_px`）：
     达不到的身份在生产里根本抽不到 EYE_CLOSE，拿它跑场景 19 只能测出"合成素材太弱"。
+
+    还要**过一遍传输编码**（JPEG q90 编解码）再量：服务端看到的是压缩后的帧，
+    而压缩会把平坦的肤色块与睫毛线抹开，降幅普遍比原始帧小 0.01~0.02。少了这一步，
+    预检会放过"原始帧刚好过线、线上刚好不过"的身份——实测 40 个身份里有 3 个是这种。
     """
     try:
         import cv2
@@ -122,7 +137,10 @@ def _eye_detectable(person: str) -> bool:
         img = cv2.imread(os.path.join(synth.DATASET, person, f"{person}_0.jpg"))
         if img is None:
             return False
-        base = synth.composite(img)
+        # 与 flows.checkin_frames_eye 同序：先在原始帧上涂眼睑，再统一编码上传
+        raw_base = synth.composite(img)
+        raw_shut = synth.close_eyes(raw_base)
+        base, shut = _wire(raw_base), _wire(raw_shut)
         face = detector().detect_largest(base)
         if face is None:
             return False
@@ -134,7 +152,6 @@ def _eye_detectable(person: str) -> bool:
         if base_ratio < settings.action.eye_base_min:
             return False
 
-        shut = synth.close_eyes(base)
         closed = detector().detect_largest(shut)
         if closed is None:
             return False
