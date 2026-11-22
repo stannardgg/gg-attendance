@@ -379,7 +379,13 @@ components:
           type: string
           nullable: true
           enum: [liveness, identity, action_count, multi_face, no_face, match]
-        retryLeft: { type: integer }
+        retryLeft:
+          type: integer
+          nullable: true
+          description: |
+            剩余可重试次数（CR-023）。仅判定失败时回传（由 Java 计数后下发，
+            权威值不在客户端）；通过或 rejectGate=commit（系统故障）时为 null。
+            为 0 时结果面板隐藏重试按钮，只留申诉入口。
         baselineDegraded: { type: boolean }
         gates:
           type: object

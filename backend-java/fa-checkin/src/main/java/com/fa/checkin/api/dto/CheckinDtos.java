@@ -104,6 +104,27 @@ public final class CheckinDtos {
             int retryLeft) {
     }
 
+    /** Python finish 判失败后上报（契约 /internal/checkin/attempt/fail）。rejectGate 仅作排障记录。 */
+    public record AttemptFailReq(
+            @NotNull Long sessionId,
+            @NotNull Long studentId,
+            String rejectGate) {
+    }
+
+    /**
+     * 刷脸失败计数状态（CR-023，契约 /internal/checkin/attempt*）。
+     *
+     * <p>{@code blocked} 为 true 时：join 以 FA-3005 拒绝、首页显示「识别失败」
+     * 并拒绝点击、Python start 拒绝再开挑战。计数只增不减——撤销/驳回申诉
+     * 不清零，理由见 CR-023：申诉是老师的核对通道，不是重试次数的重置键。
+     */
+    public record AttemptData(
+            Long sessionId,
+            int failCount,
+            int retryLeft,
+            boolean blocked) {
+    }
+
     public record ActiveSession(
             Long sessionId,
             String title,
@@ -119,7 +140,13 @@ public final class CheckinDtos {
              * <p>目前前端只用 PENDING —— 有在办申诉时首页显示「申诉中」并拒绝进入采集页，
              * 与后端 join 的 FA-5001 形成前后两道。其余状态（REJECTED/WITHDRAWN）照常可签。
              */
-            String appealStatus) {
+            String appealStatus,
+            /**
+             * 剩余可重试次数（CR-023）。0 = 识别失败已达上限：
+             * 首页显示「识别失败」并拒绝点击，join 会以 FA-3005 拒绝。
+             * 已签成功（PRESENT/LATE）时无意义，恒回填上限值，前端不读。
+             */
+            int retryLeft) {
     }
 
     /**

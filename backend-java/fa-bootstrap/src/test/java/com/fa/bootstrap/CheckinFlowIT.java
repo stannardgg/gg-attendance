@@ -36,6 +36,12 @@ class CheckinFlowIT extends ItBase {
         return rest.exchange(path, HttpMethod.POST, new HttpEntity<>(body, h), JsonNode.class);
     }
 
+    private ResponseEntity<JsonNode> internalGet(String path) {
+        HttpHeaders h = new HttpHeaders();
+        h.set("X-Internal-Token", INTERNAL);
+        return rest.exchange(path, HttpMethod.GET, new HttpEntity<>(h), JsonNode.class);
+    }
+
     @Test
     @DisplayName("建会话→join→commit→幂等→相似度下限→异班→结束，全程 HTTP")
     void fullFlow() {
@@ -269,5 +275,78 @@ class CheckinFlowIT extends ItBase {
         }
         assertThat(mine).as("进行中的场次仍应出现在列表里").isNotNull();
         assertThat(mine.path("appealStatus").asText()).isEqualTo("PENDING");
+    }
+
+    @Test
+    @DisplayName("CR-023：识别失败 3 次后 join 以 FA-3005 拒绝，active 回传 retryLeft=0")
+    void retryExceededBlocksJoin() {
+        String admin = login(ADMIN, ADMIN_PWD);
+        String s = suffix();
+        long cid = post("/api/v1/admin/classes",
+                Map.of("code", "RC" + s, "name", "限次班" + s), admin)
+                .getBody().path("data").path("id").asLong();
+        long kid = post("/api/v1/admin/courses",
+                Map.of("code", "RK" + s.toUpperCase(), "name", "限次课"), admin)
+                .getBody().path("data").path("id").asLong();
+        long tid = post("/api/v1/admin/teachers",
+                Map.of("teacherNo", "RT" + s, "name", "限次教师", "password", "Teacher12345"), admin)
+                .getBody().path("data").path("id").asLong();
+        for (String[] p : new String[][]{{"CLASS", String.valueOf(cid)}, {"COURSE", String.valueOf(kid)}}) {
+            post("/api/v1/admin/teacher-scopes",
+                    Map.of("teacherId", tid, "scopeType", p[0], "scopeId", Long.parseLong(p[1])), admin);
+        }
+        long stuId = post("/api/v1/admin/students",
+                Map.of("studentNo", "RS" + s, "name", "限次生", "classId", cid), admin)
+                .getBody().path("data").path("id").asLong();
+        post("/api/v1/auth/student/activate", Map.of("studentNo", "RS" + s, "name", "限次生",
+                "classCode", "RC" + s, "password", "Student12345"), null);
+        String stu = login("RS" + s, "Student12345");
+        String teacher = login("RT" + s, "Teacher12345");
+
+        long sid = post("/api/v1/admin/sessions",
+                Map.of("classId", cid, "courseId", kid, "title", "限次签到", "durationMinutes", 30),
+                teacher).getBody().path("data").path("id").asLong();
+        assertThat(jdbc.update("UPDATE face_profile SET status = 'ACTIVE', sample_count = 5 "
+                        + "WHERE student_id = ?", stuId))
+                .as("学生创建时应已存在 face_profile 行").isEqualTo(1);
+
+        // 首次 join：retryLeft=3（上限，无失败记录）
+        ResponseEntity<JsonNode> join = post("/api/v1/mobile/sessions/" + sid + "/join", null, stu);
+        assertThat(join.getStatusCode().value()).isEqualTo(200);
+        assertThat(join.getBody().path("data").path("retryLeft").asInt())
+                .as("JoinData.retryLeft 应为真实剩余次数，不再硬编码").isEqualTo(3);
+
+        // 三次失败上报（Python finish 判失败后带 rejectGate 调这里）
+        for (int i = 1; i <= 3; i++) {
+            ResponseEntity<JsonNode> fail = internalPost("/internal/checkin/attempt/fail",
+                    Map.of("sessionId", sid, "studentId", stuId, "rejectGate", "action_count"));
+            assertThat(fail.getStatusCode().value()).as("第 %d 次上报", i).isEqualTo(200);
+            JsonNode attempt = fail.getBody().path("data");
+            assertThat(attempt.path("failCount").asInt()).isEqualTo(i);
+            assertThat(attempt.path("retryLeft").asInt()).isEqualTo(3 - i);
+            assertThat(attempt.path("blocked").asBoolean()).isEqualTo(i == 3);
+        }
+
+        // 第 4 次领票：权威拒绝，429 FA-3005（采集页的 UI 隐藏只是第一道）
+        ResponseEntity<JsonNode> blocked = post("/api/v1/mobile/sessions/" + sid + "/join", null, stu);
+        assertThat(blocked.getStatusCode().value()).isEqualTo(429);
+        assertThat(code(blocked)).isEqualTo("FA-3005");
+
+        // 首页列表回传 retryLeft=0：前端据此显示「识别失败」并拒绝点击
+        JsonNode mine = null;
+        for (JsonNode it : get("/api/v1/mobile/sessions/active", stu).getBody().path("data")) {
+            if (it.path("sessionId").asLong() == sid) {
+                mine = it;
+            }
+        }
+        assertThat(mine).as("进行中的场次仍应出现在列表里").isNotNull();
+        assertThat(mine.path("retryLeft").asInt()).isEqualTo(0);
+
+        // 内部查询端点（Python start 前调用）：blocked=true，旧票据偷跑第 4 次被拦
+        ResponseEntity<JsonNode> status = internalGet(
+                "/internal/checkin/attempt?sessionId=" + sid + "&studentId=" + stuId);
+        assertThat(status.getStatusCode().value()).isEqualTo(200);
+        assertThat(status.getBody().path("data").path("blocked").asBoolean()).isTrue();
+        assertThat(status.getBody().path("data").path("failCount").asInt()).isEqualTo(3);
     }
 }

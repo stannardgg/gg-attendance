@@ -126,22 +126,37 @@ class ActionConfig:
     # drop_ratio 再要求落到基线的 60% 以下，避免「本来就很暗的眼睛」靠绝对量过关。
     eye_dark_drop: float = field(default_factory=lambda: _get_float("EYE_DARK_DROP", 0.06))
     eye_drop_ratio: float = field(default_factory=lambda: _get_float("EYE_DROP_RATIO", 0.60))
-    eye_hold_frames: int = field(default_factory=lambda: _get_int("EYE_HOLD_FRAMES", 2))
+    # hold=1（2026-11-22 真机 1.25fps 采样修正）：服务端单帧 det 460ms + arcface 260ms
+    # ≈ 800ms，前端 4fps 采集 + 串行上传（MAX_QUEUE=4）后有效入库只有 ~1.25fps。
+    # 闭眼约 1 秒在 800ms 帧距下只有 1~2 帧落窗，hold=2 要求"连续 2 帧"时按文案做
+    # 也判不过（转头保持半秒更是常态 0 帧）。hold=1 的单帧误判率：闭眼 3.9σ ≈ 5e-5，
+    # 转头 11.5σ ≈ 0；动作随机抽签下预录视频无法预知被抽到哪个动作，1 帧不构成攻击面。
+    eye_hold_frames: int = field(default_factory=lambda: _get_int("EYE_HOLD_FRAMES", 1))
     # 可做性门槛：基线眼区太暗（浓妆/逆光）就没有下降空间；瞳距太小（人太远）
     # 眼框只有十几个像素，统计量不可信。命中门槛的动作不参与随机。
     eye_base_min: float = 0.10
     eye_min_iod_px: float = 45.0
+    # 姿态一致性闸（2026-11-22）：固定眼框 ROI 在 start 锁定，闭眼判据窗内
+    # 头部一旦偏航/滚转，虹膜会被搬出 ROI，暗度下降被误读成「闭眼」——
+    # 验收发现的「提示闭眼却转头/歪头也签到成功」就是这条通道。姿态相对
+    # 基线超界的帧不计入闭眼判据；全部帧超界时直接判未完成（眼区统计整体
+    # 不可信）。阈值与 probe_action --pose 的标定范围对齐（±15° = 0.26 rad），
+    # 勿凭感觉调。
+    eye_pose_yaw_max: float = 0.10
+    eye_pose_roll_max: float = 0.26
     # 转头（CR-021）：偏航代理 = 鼻尖相对双眼中点的横向偏移 / 瞳距。
     # 0.12 对应约 24°（按鼻尖前凸 0.30×瞳距估算）；静止抖动 std=0.0104 → 11.5σ。
     # 整帧滚转 ±15/±30° 的漂移 mean 0.030 / max 0.108 —— 极端歪头仍可能被算成
     # 转头，这是**单向**的误放行（不会误拒），代价可接受，见 CR-021「已知限制」。
     turn_delta: float = field(default_factory=lambda: _get_float("TURN_DELTA", 0.12))
-    turn_hold_frames: int = field(default_factory=lambda: _get_int("TURN_HOLD_FRAMES", 2))
+    turn_hold_frames: int = field(default_factory=lambda: _get_int("TURN_HOLD_FRAMES", 1))
     # 基线已经明显偏头（|代理| > 0.10）时，不再要求「继续往同侧转」——
     # 再转 20° 会滑出检测范围，学生照做反而被 FA-4001 中止。
     turn_base_max: float = 0.10
     window_ms_eye: int = field(default_factory=lambda: _get_int("WINDOW_MS_EYE", 3000))
-    window_ms_turn: int = field(default_factory=lambda: _get_int("WINDOW_MS_TURN", 2500))
+    # 转头窗口与尺度类对齐到 3s：1.25fps 下 2.5s 只有 3 帧，扣掉反应时间后
+    # 转头那一帧经常落在交卷之后（真机日志：达标帧恰好是末帧）。
+    window_ms_turn: int = field(default_factory=lambda: _get_int("WINDOW_MS_TURN", 3000))
     # 白名单可用 FA_ACTION_WHITELIST 覆盖（逗号分隔）：
     # 新动作在真机标定完成前，运维可以不重建镜像就把它们摘下来。
     #

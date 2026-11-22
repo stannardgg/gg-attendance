@@ -1,6 +1,7 @@
 package com.fa.checkin.api;
 
 import com.fa.checkin.api.dto.CheckinDtos;
+import com.fa.checkin.app.CheckinAttemptService;
 import com.fa.checkin.app.CheckinService;
 import com.fa.checkin.app.LiveBroadcaster;
 import com.fa.common.api.Result;
@@ -21,10 +22,14 @@ import org.springframework.web.bind.annotation.RestController;
 public class InternalCheckinController {
 
     private final CheckinService checkinService;
+    private final CheckinAttemptService attempts;
     private final LiveBroadcaster broadcaster;
 
-    public InternalCheckinController(CheckinService checkinService, LiveBroadcaster broadcaster) {
+    public InternalCheckinController(CheckinService checkinService,
+                                     CheckinAttemptService attempts,
+                                     LiveBroadcaster broadcaster) {
         this.checkinService = checkinService;
+        this.attempts = attempts;
         this.broadcaster = broadcaster;
     }
 
@@ -32,6 +37,28 @@ public class InternalCheckinController {
     public CheckinDtos.ContextResp context(@PathVariable long id,
                                            @RequestParam long studentId) {
         return checkinService.context(id, studentId);
+    }
+
+    /**
+     * 刷脸失败计数查询（CR-023）。Python 在 challenge/start 前调用：
+     * join 拦的是「领新票」，但失败后票据还有最长 60 秒寿命，旧票据能直接
+     * 开新挑战——上限必须在 start 也查一次，否则第 4 次采集照跑。
+     */
+    @GetMapping("/internal/checkin/attempt")
+    public Result<CheckinDtos.AttemptData> attemptStatus(@RequestParam long sessionId,
+                                                         @RequestParam long studentId) {
+        return Result.ok(attempts.status(sessionId, studentId));
+    }
+
+    /**
+     * 上报一次识别失败（CR-023）。Python finish 判失败（rejectGate != commit）
+     * 后调用；Java 落库并回传计数——Python 用 retryLeft/blocked 渲染结果页，
+     * 不自己维护次数（客户端计数只做展示兜底，权威值在这里）。
+     */
+    @PostMapping("/internal/checkin/attempt/fail")
+    public Result<CheckinDtos.AttemptData> attemptFail(
+            @Valid @RequestBody CheckinDtos.AttemptFailReq req) {
+        return Result.ok(attempts.recordFailure(req.sessionId(), req.studentId(), req.rejectGate()));
     }
 
     @PostMapping("/internal/checkin/commit")

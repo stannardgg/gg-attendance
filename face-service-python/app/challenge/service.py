@@ -20,7 +20,7 @@ import numpy as np
 
 from app.challenge import gates
 from app.challenge.action import (
-    dark_ratio, eye_dark_ratio, face_scale, interocular, yaw_proxy,
+    dark_ratio, eye_dark_ratio, face_scale, interocular, roll_proxy, yaw_proxy,
 )
 from app.challenge.store import (
     BASELINE_FREE_ACTIONS, EYE_ACTIONS, SCALE_ACTIONS, TURN_ACTIONS,
@@ -43,9 +43,12 @@ INSTRUCTIONS = {
     # CR-021：闭眼而不是眨眼。4fps 采样下眨眼的闭合期（100~300ms）多数落在
     # 两帧之间，要求连续 2 帧达标时真人做对也判不过——改成"闭住约 1 秒"，
     # 同一套眼区判据，但不再赌采样运气。
+    # 2026-11-22 hold 修正：真机有效采样 ~1.25fps（服务端单帧 ~800ms），1 秒
+    # 恰好保证至少 1 帧落窗（hold=1）；转头若仍说"保持半秒"，0.5s < 0.8s 帧距
+    # 有概率一帧都不落，必须说"保持约 1 秒"。
     "EYE_CLOSE": "请闭上眼睛约 1 秒，再睁开",
-    "TURN_LEFT": "请把头慢慢转向你的左边，约 25 度，保持半秒",
-    "TURN_RIGHT": "请把头慢慢转向你的右边，约 25 度，保持半秒",
+    "TURN_LEFT": "请把头慢慢转向你的左边，约 25 度，保持约 1 秒",
+    "TURN_RIGHT": "请把头慢慢转向你的右边，约 25 度，保持约 1 秒",
 }
 
 # 动作未达成时的实时提示（进度提示由 _hint 统一拼）
@@ -79,10 +82,17 @@ class ChallengeService:
         session_id = int(claims["sid"])
         student_id = int(claims["studentId"])
 
+        # CR-023：join 拦的是「领新票」，但失败后票据还有最长 60 秒寿命，
+        # 旧票据能直接开新挑战——上限必须在 start 也查一次，否则第 4 次采集照跑。
+        # Java 不可达时降级放行：commit 反正也要过 Java，这里死拦只会把「Java 抖了一下」
+        # 放大成「全班都签不了」。
+        self._ensure_not_blocked(session_id, student_id)
+
         baseline_ratio: float | None = None
         baseline_scale = 0.0
         baseline_eye = 0.0
         baseline_yaw = 0.0
+        baseline_roll = 0.0
         degraded = True
         roi: tuple[int, int, int, int] | None = None
         eye_roi: list[int] | None = None
@@ -105,6 +115,7 @@ class ChallengeService:
         if face is not None:
             baseline_scale = face_scale(face, baseline_bgr.shape[1])
             baseline_yaw = yaw_proxy(face)
+            baseline_roll = roll_proxy(face)
             crop = None
             pts = None
             try:
@@ -144,6 +155,7 @@ class ChallengeService:
             baseline_scale=baseline_scale,
             baseline_eye=baseline_eye,
             baseline_yaw=baseline_yaw,
+            baseline_roll=baseline_roll,
         )
         if roi is not None:
             st.roi_x1, st.roi_y1, st.roi_x2, st.roi_y2 = roi
@@ -255,6 +267,9 @@ class ChallengeService:
             if st.multi_face_run >= settings.challenge.multi_face_frames:
                 st.closed = True
                 self.store.save(st)
+                # 中止也算一次失败（CR-023）：采集页把它当 ERROR 计数，
+                # 服务端不记的话，「三次」就只约束门禁判定，不约束画面失控。
+                self._record_failure(st, "multi_face")
                 raise TooManyFaces("检测到多张人脸")
             self.store.save(st)
             return self._frame_resp(st, accepted=True, hint="请让其他人离开画面")
@@ -275,6 +290,8 @@ class ChallengeService:
             if st.no_face_run >= settings.challenge.no_face_frames:
                 st.closed = True
                 self.store.save(st)
+                # 同 multi_face：中止也计一次失败（CR-023）
+                self._record_failure(st, "no_face")
                 raise NoFace("未检测到人脸")
             self.store.save(st)
             return self._frame_resp(st, accepted=True, hint="请正对摄像头")
@@ -322,6 +339,11 @@ class ChallengeService:
         st.scales.append(face_scale(face, frame_bgr.shape[1]))
         if st.action in EYE_ACTIONS and st.eye_roi:
             st.eyes.append(eye_dark_ratio(gray, st.eye_roi))
+            # 姿态代理与 eyes 严格同长（同一分支追加）：闭眼判据窗内头部移动
+            # 会把虹膜搬出固定 ROI，暗度下降是「移动」不是「闭眼」——
+            # gates.gate_action 用这两个序列把超界帧剔除。
+            st.eye_yaws.append(yaw_proxy(face))
+            st.eye_rolls.append(roll_proxy(face))
         if st.action in TURN_ACTIONS:
             yaw = yaw_proxy(face)
             st.yaws.append(yaw)
@@ -391,6 +413,8 @@ class ChallengeService:
             "attendanceStatus": None,
             "attendanceId": None,
             "checkinAt": None,
+            # 失败时由 Java 回填（CR-023）；通过/系统故障时保持 None，前端不读
+            "retryLeft": None,
         }
 
         # 门禁全过才落库。落库失败必须让学生看到，不能"假成功"。
@@ -426,6 +450,15 @@ class ChallengeService:
                 result["rejectGate"] = "commit"
                 result["commitError"] = f"提交签到结果失败：{exc}"
 
+        # 判定失败才计失败次数（CR-023）。rejectGate=commit 是系统故障，学生没有
+        # 做错任何事，把 Java 宕机算到他头上、三次后锁死，是把基础设施问题转嫁给学生。
+        # 契约 FinishData.retryLeft 早就声明了该字段，这里第一次有真值——
+        # 结果面板据此隐藏重试按钮，权威值不在客户端。
+        if not result["passed"] and result["rejectGate"] not in (None, "commit"):
+            attempt = self._record_failure(st, result["rejectGate"])
+            if attempt:
+                result["retryLeft"] = attempt.get("retryLeft")
+
         # 判定明细必须落日志：finish 是 200 + 业务结果，网关只看到 200，
         # 不记这一行的话「签到失败」在现场完全无法归因（只能靠帧耗时反推）。
         logger.info(
@@ -440,6 +473,41 @@ class ChallengeService:
         return result
 
     # ---------------- helpers ----------------
+    def _ensure_not_blocked(self, session_id: int, student_id: int) -> None:
+        """失败次数达到上限就拒绝开新挑战（CR-023）。
+
+        上报/查询失败一律降级放行并留日志：计数缺失的最坏结果是多几次重试
+        （每次仍要过三道门禁），而误拦的最坏结果是全班签不了。两害相权取其轻。
+        """
+        from app import java_client
+        try:
+            attempt = java_client.checkin_attempt_status(session_id, student_id)
+        except java_client.JavaError as exc:
+            logger.warning("attempt 查询被拒 sid=%s student=%s code=%s",
+                           session_id, student_id, exc.code)
+            return
+        except Exception as exc:                                # noqa: BLE001
+            logger.warning("attempt 查询不可达 sid=%s student=%s err=%s",
+                           session_id, student_id, exc)
+            return
+        if attempt.get("blocked"):
+            raise RetryExceeded(
+                f"识别失败 {attempt.get('failCount', '?')} 次，本场已锁定，请提交申诉让老师核对")
+
+    def _record_failure(self, st: ChallengeState, gate: str) -> dict | None:
+        """把一次识别失败上报 Java 落库（CR-023）。返回计数状态，失败返回 None。
+
+        上报不成功不改变本次挑战的判定结果：学生已经失败了，这一帧的反馈
+        不能因为计数系统抖动而变成「系统错误」。
+        """
+        from app import java_client
+        try:
+            return java_client.record_checkin_failure(st.session_id, st.student_id, gate)
+        except Exception as exc:                                # noqa: BLE001
+            logger.warning("失败计数上报失败 cid=%s sid=%s student=%s gate=%s err=%s",
+                           st.challenge_id, st.session_id, st.student_id, gate, exc)
+            return None
+
     def _count(self, st: ChallengeState) -> int:
         return gates.gate_action(st)[1]
 
@@ -466,3 +534,11 @@ class TooManyFaces(RuntimeError):
 
 class NoFace(RuntimeError):
     """连续多帧无脸 → 中止（FA-4001）。"""
+
+
+class RetryExceeded(RuntimeError):
+    """识别失败次数已达上限（CR-023）→ 429 FA-3005。
+
+    与 TooManyFaces/NoFace 不同，这不是单场挑战的判定结果，而是「这场签到
+    不再放行」的门禁：计数在 Java/MySQL（checkin_attempt），start 前查询。
+    """

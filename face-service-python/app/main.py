@@ -26,7 +26,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from app import engine
-from app.challenge.service import ChallengeService, NoFace, TooManyFaces
+from app.challenge.service import ChallengeService, NoFace, RetryExceeded, TooManyFaces
 from app.challenge.store import ChallengeStore
 from app.config import settings
 from app.engine import ModelUnavailable
@@ -126,6 +126,13 @@ async def _multi_face(request: Request, exc: TooManyFaces):
 @app.exception_handler(NoFace)
 async def _no_face(request: Request, exc: NoFace):
     return _resp(request, "FA-4001", "未检测到人脸", None, 400)
+
+
+@app.exception_handler(RetryExceeded)
+async def _retry_exceeded(request: Request, exc: RetryExceeded):
+    # CR-023：失败次数达上限。与 join 的 FA-3005 同码——学生无论从哪个门进，
+    # 看到的都是同一句「次数已达上限」。
+    return _resp(request, "FA-3005", str(exc) or "重试次数过多，请稍后再试或提交申诉", None, 429)
 
 
 @app.exception_handler(ValueError)

@@ -53,6 +53,8 @@ export function useFrameUploader(opts: Options) {
   const sentFrames = ref(0)
   const errorText = ref('')
   const blockedGate = ref<string | null>(null)
+  /** 服务端判定失败次数已达上限（CR-023）：FA-3005 或 finish.retryLeft=0 */
+  const retryBlocked = ref(false)
   const challenge = shallowRef<ChallengeStartData | null>(null)
   const finish = shallowRef<FinishData | null>(null)
   const paused = ref(false)
@@ -75,6 +77,7 @@ export function useFrameUploader(opts: Options) {
     sentFrames.value = 0
     errorText.value = ''
     blockedGate.value = null
+    retryBlocked.value = false
     challenge.value = null
     finish.value = null
     paused.value = false
@@ -243,6 +246,11 @@ export function useFrameUploader(opts: Options) {
       if (!data.passed) {
         blockedGate.value = data.rejectGate ?? 'match'
         errorText.value = ERROR_MESSAGES[gateCode(data.rejectGate)] ?? '签到未通过'
+        // CR-023：权威计数在服务端。retryLeft=0 时隐藏重试按钮——
+        // 本地 attempts 只是展示兜底，刷新页面就清零，不能当门禁用。
+        if (typeof data.retryLeft === 'number' && data.retryLeft <= 0) {
+          retryBlocked.value = true
+        }
       }
     } catch (err) {
       fail(err)
@@ -258,6 +266,10 @@ export function useFrameUploader(opts: Options) {
       errorText.value = err.message || ERROR_MESSAGES[err.code] || '签到失败'
       const data = err.data as { retryLeft?: number; hint?: string } | null
       if (data?.hint) hint.value = data.hint
+      // CR-023：start 阶段被 FA-3005 拒（旧票据偷跑第 4 次）同样锁死重试
+      if (err.code === 'FA-3005') {
+        retryBlocked.value = true
+      }
       if (err.code === 'FA-4002') {
         blockedGate.value = 'multi_face'
         opts.onMultiFace?.()
@@ -316,6 +328,7 @@ export function useFrameUploader(opts: Options) {
     sentFrames,
     errorText,
     blockedGate,
+    retryBlocked,
     challenge,
     finish,
     paused,

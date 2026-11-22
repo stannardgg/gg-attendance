@@ -329,9 +329,88 @@ def test_turn_gate_rejects_static_sequence():
     assert detected == 0 and not g.passed
 
 
+def test_turn_reverse_segment_vetoes_pass():
+    """反向动作否决：「提示左转却右转」即使碰上单帧噪声也不许过。
+
+    复现验收发现的误放行：反向段本身不产生正向计数，但 hold=1 下滚转残余
+    （实测最大 0.108）+ 噪声可能在正向凑出一段。只要反向出现过达标段，
+    正向计数再够也判不过。
+    """
+    from app.challenge import gates
+    st = _state("TURN_LEFT", baseline_yaw=-0.03,
+                yaws=[-0.03, 0.11, 0.12, -0.20, -0.19, -0.03])
+    g, detected, _ = gates.gate_action(st)
+    assert detected == 1 and not g.passed
+
+
+def test_turn_reverse_veto_does_not_reject_correct_turn():
+    """正向做对不误伤：左转-保持-回正的序列没有反向达标段（回正 Δ≈0）。"""
+    from app.challenge import gates
+    st = _state("TURN_LEFT", baseline_yaw=-0.03,
+                yaws=[-0.03, 0.11, 0.12, 0.10, -0.02, -0.03])
+    g, detected, _ = gates.gate_action(st)
+    assert detected == 1 and g.passed
+
+
+def test_scale_reverse_segment_vetoes_pass():
+    """尺度反向否决：提示靠近却退远，靠噪声凑出的正向段不能过。"""
+    from app.challenge import gates
+    st = _state("MOVE_CLOSER", baseline_scale=0.30,
+                scales=[0.30, 0.36, 0.37, 0.30, 0.24, 0.23, 0.30])
+    g, detected, _ = gates.gate_action(st)
+    assert detected == 1 and not g.passed
+
+
+def test_scale_reverse_veto_does_not_reject_correct_closer():
+    from app.challenge import gates
+    st = _state("MOVE_CLOSER", baseline_scale=0.30,
+                scales=[0.30, 0.36, 0.37, 0.34, 0.30, 0.31])
+    g, detected, _ = gates.gate_action(st)
+    assert detected == 1 and g.passed
+
+
 def test_eye_gate_counts_closed_segment():
     from app.challenge import gates
     st = _state("EYE_CLOSE", baseline_eye=0.25, eyes=[0.25, 0.26, 0.05, 0.05, 0.25])
+    g, detected, _ = gates.gate_action(st)
+    assert detected == 1 and g.passed
+
+
+def test_eye_pose_gate_excludes_displaced_frames():
+    """姿态一致性闸：提示闭眼却转头 → 虹膜被搬出固定 ROI，暗度下降是
+    「移动」不是「闭眼」。偏航超界的帧不计入判据，全部超界判未完成。"""
+    from app.challenge import gates
+    st = _state("EYE_CLOSE", baseline_eye=0.25, baseline_yaw=0.0, baseline_roll=0.0,
+                eyes=[0.25, 0.05, 0.05],
+                eye_yaws=[0.0, 0.30, 0.30], eye_rolls=[0.0, 0.0, 0.0])
+    g, detected, _ = gates.gate_action(st)
+    assert detected == 0 and not g.passed
+
+
+def test_eye_pose_gate_excludes_rolled_frames():
+    """滚转同理：歪头也会把眼框搬离 ROI。"""
+    from app.challenge import gates
+    st = _state("EYE_CLOSE", baseline_eye=0.25, baseline_yaw=0.0, baseline_roll=0.0,
+                eyes=[0.25, 0.05, 0.05],
+                eye_yaws=[0.0, 0.02, 0.02], eye_rolls=[0.0, 0.40, 0.40])
+    g, detected, _ = gates.gate_action(st)
+    assert detected == 0 and not g.passed
+
+
+def test_eye_pose_gate_keeps_still_frames():
+    """正常闭眼（头部不动）不受闸门影响。"""
+    from app.challenge import gates
+    st = _state("EYE_CLOSE", baseline_eye=0.25, baseline_yaw=0.0, baseline_roll=0.0,
+                eyes=[0.25, 0.05, 0.05],
+                eye_yaws=[0.0, 0.02, 0.02], eye_rolls=[0.0, 0.05, 0.05])
+    g, detected, _ = gates.gate_action(st)
+    assert detected == 1 and g.passed
+
+
+def test_eye_gate_legacy_state_without_pose_still_counts():
+    """部署前开的存量 challenge 没有逐帧姿态：闸门跳过，保持原判据。"""
+    from app.challenge import gates
+    st = _state("EYE_CLOSE", baseline_eye=0.25, eyes=[0.25, 0.05, 0.05])
     g, detected, _ = gates.gate_action(st)
     assert detected == 1 and g.passed
 
@@ -355,4 +434,7 @@ def test_new_action_instructions_and_windows(service, face_img, monkeypatch):
     eye = service.start(tickets.issue(1, 130, "jti-eye"), base, action_hint="EYE_CLOSE")
     assert "闭" in eye["instruction"] and eye["windowMs"] == 3000
     right = service.start(tickets.issue(1, 131, "jti-turn"), base, action_hint="TURN_RIGHT")
-    assert "右边" in right["instruction"] and right["windowMs"] == 2500
+    # 2026-11-22 真机采样修正：转头窗口与尺度类对齐 3s，文案改「保持约 1 秒」
+    # （0.5s < 服务端 ~0.8s 帧距，按旧文案做会一帧都不落窗）
+    assert "右边" in right["instruction"] and right["windowMs"] == 3000
+    assert "保持约 1 秒" in right["instruction"]
