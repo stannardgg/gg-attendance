@@ -2,6 +2,7 @@ package com.fa.agent.app;
 
 import com.fa.agent.api.dto.AgentDtos;
 import com.fa.agent.app.tools.DraftTools;
+import com.fa.agent.app.tools.ExportTools;
 import com.fa.agent.app.tools.QueryTools;
 import com.fa.agent.app.tools.ToolSpec;
 import com.fa.agent.app.tools.WriteTools;
@@ -29,11 +30,12 @@ public class ToolRegistry {
     private final AgentLevelService levels;
 
     public ToolRegistry(QueryTools queryTools, DraftTools draftTools, WriteTools writeTools,
-                        AgentLevelService levels) {
+                        ExportTools exportTools, AgentLevelService levels) {
         this.levels = levels;
         Map<String, ToolSpec> map = new LinkedHashMap<>();
         List<ToolSpec> all = new ArrayList<>();
         all.addAll(queryTools.specs());
+        all.addAll(exportTools.specs());
         all.addAll(draftTools.specs());
         all.addAll(writeTools.specs());
         for (ToolSpec spec : all) {

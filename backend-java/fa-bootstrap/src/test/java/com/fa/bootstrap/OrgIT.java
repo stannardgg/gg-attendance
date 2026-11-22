@@ -190,4 +190,161 @@ class OrgIT extends ItBase {
         assertThat(dup.getStatusCode().value()).isEqualTo(409);
         assertThat(code(dup)).isEqualTo("FA-2002");
     }
+
+    /* ---------------- CR-019 教师资料修改申请 ---------------- */
+
+    @Test
+    @DisplayName("教师提交资料修改申请 → 管理员通过 → teacher 表生效且留审计")
+    void teacherProfileRequestApprove() {
+        String admin = login(ADMIN, ADMIN_PWD);
+        String s = suffix();
+        Map<String, Object> t = createTeacher(admin, "TP" + s);
+        String token = login((String) t.get("no"), "Teacher12345");
+        long teacherId = (long) t.get("id");
+
+        // 教师能看到自己的档案（含院系/职称），且只读
+        ResponseEntity<JsonNode> self = get("/api/v1/teacher/profile", token);
+        assertThat(self.getStatusCode().value()).isEqualTo(200);
+        assertThat(self.getBody().path("data").path("teacherNo").asText()).isEqualTo(t.get("no"));
+
+        ResponseEntity<JsonNode> submit = post("/api/v1/teacher/profile-requests",
+                Map.of("name", "改名" + s, "department", "信息学院", "reason", "职称晋升"), token);
+        assertThat(submit.getStatusCode().value()).as("提交失败：%s", submit.getBody()).isEqualTo(200);
+        assertThat(submit.getBody().path("data").path("status").asText()).isEqualTo("PENDING");
+        long requestId = submit.getBody().path("data").path("id").asLong();
+
+        // 同一教师第二条 PENDING 被唯一键拦下 → FA-2007
+        ResponseEntity<JsonNode> dup = post("/api/v1/teacher/profile-requests",
+                Map.of("title", "副教授"), token);
+        assertThat(dup.getStatusCode().value()).isEqualTo(409);
+        assertThat(code(dup)).isEqualTo("FA-2007");
+
+        // 教师不能自己审核，也不能看全局列表
+        assertThat(code(post("/api/v1/admin/teacher-profile-requests/" + requestId + "/handle",
+                Map.of("approved", true), token))).isEqualTo("FA-1003");
+        assertThat(code(get("/api/v1/admin/teacher-profile-requests", token))).isEqualTo("FA-1003");
+
+        // 驳回必须写理由
+        ResponseEntity<JsonNode> noReason = post("/api/v1/admin/teacher-profile-requests/" + requestId + "/handle",
+                Map.of("approved", false), admin);
+        assertThat(noReason.getStatusCode().value()).isEqualTo(409);
+        assertThat(code(noReason)).isEqualTo("FA-2007");
+
+        ResponseEntity<JsonNode> approve = post("/api/v1/admin/teacher-profile-requests/" + requestId + "/handle",
+                Map.of("approved", true, "note", "核对无误"), admin);
+        assertThat(approve.getStatusCode().value()).as("审核失败：%s", approve.getBody()).isEqualTo(200);
+        assertThat(approve.getBody().path("data").path("status").asText()).isEqualTo("APPROVED");
+
+        // 生效：教师档案已更新；重复审核被拒
+        ResponseEntity<JsonNode> after = get("/api/v1/teacher/profile", token);
+        assertThat(after.getBody().path("data").path("name").asText()).isEqualTo("改名" + s);
+        assertThat(after.getBody().path("data").path("department").asText()).isEqualTo("信息学院");
+        assertThat(code(post("/api/v1/admin/teacher-profile-requests/" + requestId + "/handle",
+                Map.of("approved", true), admin))).isEqualTo("FA-2007");
+
+        // 审计里能查到这次通过（before/after 都在）
+        List<JsonNode> logs = items(get("/api/v1/admin/audit-logs?action=TEACHER_PROFILE_APPROVE&size=100", admin));
+        assertThat(logs).anyMatch(n -> n.path("targetId").asLong() == teacherId);
+    }
+
+    @Test
+    @DisplayName("资料修改申请：空串清空院系，未变更直接拒绝")
+    void teacherProfileRequestClearField() {
+        String admin = login(ADMIN, ADMIN_PWD);
+        String s = suffix();
+        Map<String, Object> t = createTeacher(admin, "TQ" + s);
+        String token = login((String) t.get("no"), "Teacher12345");
+        long teacherId = (long) t.get("id");
+
+        // 先由管理员补一个院系
+        assertThat(put("/api/v1/admin/teachers/" + teacherId, Map.of("department", "数学系"), admin)
+                .getStatusCode().value()).isEqualTo(200);
+
+        // 原样提交 → 未变更 → FA-2007
+        ResponseEntity<JsonNode> same = post("/api/v1/teacher/profile-requests",
+                Map.of("department", "数学系"), token);
+        assertThat(same.getStatusCode().value()).isEqualTo(409);
+        assertThat(code(same)).isEqualTo("FA-2007");
+
+        // 空串 = 清空
+        ResponseEntity<JsonNode> clear = post("/api/v1/teacher/profile-requests",
+                Map.of("department", ""), token);
+        assertThat(clear.getStatusCode().value()).as("提交失败：%s", clear.getBody()).isEqualTo(200);
+        long requestId = clear.getBody().path("data").path("id").asLong();
+        assertThat(post("/api/v1/admin/teacher-profile-requests/" + requestId + "/handle",
+                Map.of("approved", true), admin).getStatusCode().value()).isEqualTo(200);
+        assertThat(get("/api/v1/teacher/profile", token).getBody().path("data").path("department").isNull())
+                .isTrue();
+    }
+
+    /* ---------------- CR-022 教师账号凭据修改申请 ---------------- */
+
+    @Test
+    @DisplayName("教师申请改用户名与密码 → 通过后新凭据可用，旧密码与旧令牌立即失效")
+    void teacherCredentialRequestApproved() {
+        String admin = login(ADMIN, ADMIN_PWD);
+        String s = suffix();
+        Map<String, Object> t = createTeacher(admin, "TW" + s);
+        String oldNo = (String) t.get("no");
+        String oldToken = login(oldNo, "Teacher12345");
+        String newNo = "TWX" + s;
+
+        // 缺当前密码 → 409 FA-2007（刻意不是 401，别把用户踢回登录页）
+        ResponseEntity<JsonNode> noCurrent = post("/api/v1/teacher/profile-requests",
+                Map.of("newPassword", "NewPassw0rd1"), oldToken);
+        assertThat(noCurrent.getStatusCode().value()).isEqualTo(409);
+        assertThat(code(noCurrent)).isEqualTo("FA-2007");
+
+        // 当前密码错 → 同样 FA-2007
+        ResponseEntity<JsonNode> wrongCurrent = post("/api/v1/teacher/profile-requests",
+                Map.of("newPassword", "NewPassw0rd1", "currentPassword", "not-my-password"), oldToken);
+        assertThat(code(wrongCurrent)).isEqualTo("FA-2007");
+
+        ResponseEntity<JsonNode> submit = post("/api/v1/teacher/profile-requests",
+                Map.of("username", newNo, "newPassword", "NewPassw0rd1",
+                        "currentPassword", "Teacher12345", "reason", "工号调整并重置密码"), oldToken);
+        assertThat(submit.getStatusCode().value()).as("提交失败：%s", submit.getBody()).isEqualTo(200);
+        long requestId = submit.getBody().path("data").path("id").asLong();
+        assertThat(submit.getBody().path("data").path("passwordChange").asBoolean()).isTrue();
+        // 响应里只有标记，绝不能出现哈希或明文
+        assertThat(submit.getBody().toString())
+                .doesNotContain("$2a$")
+                .doesNotContain("newPasswordHash")
+                .doesNotContain("NewPassw0rd1");
+
+        ResponseEntity<JsonNode> approve = post(
+                "/api/v1/admin/teacher-profile-requests/" + requestId + "/handle",
+                Map.of("approved", true, "note", "已核实本人"), admin);
+        assertThat(approve.getStatusCode().value()).as("审核失败：%s", approve.getBody()).isEqualTo(200);
+        assertThat(approve.getBody().path("data").path("newUsername").asText()).isEqualTo(newNo);
+
+        // 凭据版本 +1：旧令牌立即失效
+        assertThat(code(get("/api/v1/teacher/profile", oldToken))).isEqualTo("FA-1002");
+
+        // 旧密码不能再登录
+        ResponseEntity<JsonNode> oldLogin = post("/api/v1/auth/login",
+                Map.of("username", oldNo, "password", "Teacher12345"), null);
+        assertThat(oldLogin.getStatusCode().value()).isEqualTo(401);
+        assertThat(code(oldLogin)).isEqualTo("FA-1001");
+
+        // 新用户名 + 新密码可以
+        String newToken = login(newNo, "NewPassw0rd1");
+        assertThat(get("/api/v1/teacher/profile", newToken)
+                .getBody().path("data").path("teacherNo").asText()).isEqualTo(newNo);
+    }
+
+    @Test
+    @DisplayName("改用户名撞到已有账号 → 提交阶段就 FA-2007")
+    void teacherUsernameTaken() {
+        String admin = login(ADMIN, ADMIN_PWD);
+        String s = suffix();
+        Map<String, Object> a = createTeacher(admin, "TY" + s);
+        Map<String, Object> b = createTeacher(admin, "TZ" + s);
+        String token = login((String) a.get("no"), "Teacher12345");
+
+        ResponseEntity<JsonNode> r = post("/api/v1/teacher/profile-requests",
+                Map.of("username", (String) b.get("no"), "currentPassword", "Teacher12345"), token);
+        assertThat(r.getStatusCode().value()).isEqualTo(409);
+        assertThat(code(r)).isEqualTo("FA-2007");
+    }
 }

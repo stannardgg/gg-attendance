@@ -28,6 +28,7 @@ public enum ErrorCode {
     ORG_ARCHIVED("FA-2004", HttpStatus.BAD_REQUEST, "该班级或课程已归档，不能发起签到"),
     CLASS_HAS_STUDENTS("FA-2005", HttpStatus.CONFLICT, "班级下仍有在读学生，请先转出或归档"),
     SCOPE_DENIED("FA-2006", HttpStatus.FORBIDDEN, "你未被授权该班级或该课程"),
+    PROFILE_REQUEST_CONFLICT("FA-2007", HttpStatus.CONFLICT, "资料修改申请状态冲突"),
 
     // ---- 3xxx 签到 ----
     SESSION_CLOSED("FA-3001", HttpStatus.CONFLICT, "签到会话已结束"),

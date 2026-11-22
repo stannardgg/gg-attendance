@@ -146,20 +146,60 @@ def frames_with_opens(base_frame, bbox, opens: tuple[int, ...], n: int = 8) -> l
 
 
 def checkin_frames(person: str, opens: tuple[int, ...] = (1, 2, 4, 5), n: int = 8):
-    """取该人的第一张清晰样本造一整套签到帧，返回 (baseline, frames, bbox)。
+    """取该人的第一张清晰样本造一套**嘴部**签到帧，返回 (baseline, frames, bbox)。
+
+    ★ CR-018 起嘴部动作已停用，生产白名单不再随机它，这套帧只用于回滚验证或
+    历史判据的专项测试；正常验收改用 `checkin_frames_scale` / `checkin_frames_eye`
+    （CR-021 后当前场景里没有调用方）。
 
     默认张两次（两段各 2 帧）：一次张嘴必须连续 ≥ hold_frames(2) 帧才计数，
-    造两段可以同时满足 `MOUTH_ONCE` 与 `MOUTH_TWICE`。
-
-    ★ 但调用方**必须显式传 action**：白名单现在有 4 个动作（CR-016 增加了靠近/离远），
-    随机抽到尺度类动作时，这套张嘴帧必然被判「动作次数不足」——
-    这里造的是嘴部序列，不是尺度序列。
+    造两段可以同时满足 `MOUTH_ONCE` 与 `MOUTH_TWICE`。调用方必须显式传 action。
     """
     images = synth.person_images(person)
     base = synth.composite(images[0])
     bbox = synth.largest_bbox(base)
     frames = frames_with_opens(base, bbox, opens, n)
     return base, frames, bbox
+
+
+def checkin_frames_scale(person: str, closer: bool = True, n: int = 8,
+                         base_side: int = 320, delta: float = 0.22):
+    """造一套满足 `MOVE_CLOSER` / `MOVE_AWAY` 的签到帧，返回 (baseline, frames, bbox)。
+
+    前 4 帧保持基线尺度（让动作从基线开始），后 4 帧按 `delta` 放大/缩小。
+
+    幅度取 0.22 而不是阈值 0.18：同一张脸整图重贴时检测框的响应略大于名义倍率
+    （CR-016 实测 1.18 → 1.21），留一点余量，避免合成素材卡在阈值边界上。
+    """
+    images = synth.person_images(person)
+    base = synth.composite(images[0], side=base_side)
+    moved_side = int(round(base_side * (1 + delta if closer else 1 - delta)))
+    moved = synth.composite(images[0], side=moved_side)
+    return base, [base] * 4 + [moved] * max(2, n - 4), synth.largest_bbox(base)
+
+
+def checkin_frames_eye(person: str, closed: int = 4, n: int = 10):
+    """造一套「闭眼保持」的签到帧，返回 (baseline, frames, bbox)。
+
+    前 3 帧睁眼（动作从基线之后开始），中间 `closed` 帧闭眼（≥2 帧才计入
+    `EYE_HOLD_FRAMES`），末尾回到睁眼——真实学生也是「闭一下再睁开」。
+    """
+    images = synth.person_images(person)
+    base = synth.composite(images[0])
+    shut = synth.close_eyes(base)
+    tail = max(1, n - 3 - closed)
+    return base, [base] * 3 + [shut] * closed + [base] * tail, synth.largest_bbox(base)
+
+
+def checkin_frames_static(person: str, n: int = 8):
+    """同一帧重复 n 次：给「要求转头但完全没动」这类负例用。
+
+    素材是正面静图，合成不出真实的 3D 偏航（鼻尖是平面贴图，投影变换不会让它
+    相对双眼中点发生位移），所以转头动作在 E2E 里只能验负例；
+    正例由 `test_challenge_flow.py` 的计数器单测与 `probe_action.py --pose` 覆盖。
+    """
+    base = synth.composite(synth.person_images(person)[0])
+    return base, [base] * n, synth.largest_bbox(base)
 
 
 def wait_vector_sync(seconds: float = 12.0) -> None:

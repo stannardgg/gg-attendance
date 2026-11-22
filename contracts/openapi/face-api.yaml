@@ -292,15 +292,18 @@ components:
           type: string
           description: |
             Base64 JPEG，**指令出现之前**采集的中性帧。
-            缺失或其中检不到人脸时服务端降级，不拒绝请求。
+            动作判据是「相对基线的变化」，缺失或其中检不到人脸时无法判定：
+            服务端返回 `FA-4001`，让学生把脸放进取景框重拍，而不是抽一个注定失败的动作。
+            （CR-018 前白名单含嘴部动作，那种情况可降级为序列首帧；回滚嘴部动作后该行为恢复。）
         deviceHash: { type: string, maxLength: 64 }
         action:
           type: string
-          enum: [MOUTH_ONCE, MOUTH_TWICE, MOVE_CLOSER, MOVE_AWAY]
+          enum: [MOVE_CLOSER, MOVE_AWAY, EYE_CLOSE, TURN_LEFT, TURN_RIGHT]
           description: |
             指定动作，**仅当服务端开启 `FA_ALLOW_ACTION_HINT=1` 时生效**（CR-010）。
             正式环境忽略该字段——动作由服务端随机抽取，可自选等于把防预录的靶子交回给攻击者。
-            契约外的动作码返回 FA-2001。
+            CR-018 起 `MOUTH_ONCE` / `MOUTH_TWICE` 已停用：传入已停用动作返回 `FA-9001`（动作已停用），
+            契约外动作码返回 `FA-2001`。
 
     ChallengeStartData:
       type: object
@@ -309,14 +312,19 @@ components:
         challengeId: { type: string, example: c_8f2a1b }
         action:
           type: string
-          enum: [MOUTH_ONCE, MOUTH_TWICE, MOVE_CLOSER, MOVE_AWAY]
-          description: 白名单见 contracts/enums/actions.json；嘴部动作看 ROI 亮度，尺度动作看检测框尺寸
-        instruction: { type: string, example: 请连着张两次嘴，每次约半秒 }
-        windowMs: { type: integer, example: 3000 }
+          enum: [MOVE_CLOSER, MOVE_AWAY, EYE_CLOSE, TURN_LEFT, TURN_RIGHT]
+          description: |
+            白名单见 contracts/enums/actions.json，判据分三类：检测框尺度（`MOVE_*`）、
+            眼框暗度下降（`EYE_CLOSE`）、SCRFD 5 点偏航代理（`TURN_*`）。全部相对基线判定。
+        instruction: { type: string, example: 请把脸靠近摄像头一点，保持半秒 }
+        windowMs: { type: integer, example: 2500 }
         minFrames: { type: integer, example: 8 }
         baselineDegraded:
           type: boolean
-          description: true = 基线不可得，已退回序列首帧。**不影响签到能否成功**
+          description: |
+            true = 基线不可得，已退回序列首帧。**不影响签到能否成功**。
+            CR-018 后尺度动作没有基线直接返回 FA-4001，该字段恒 false；保留是为了
+            回滚嘴部动作时不改契约。
         expiresIn: { type: integer, example: 60 }
         needCount: { type: integer, description: 需要完成的动作次数 }
         className: { type: string }

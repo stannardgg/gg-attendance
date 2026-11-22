@@ -46,12 +46,11 @@ def one_checkin(face: Client, student: dict, sid: int) -> dict:
         j = flows.join(student["client"], sid)
         if j.status != 200:
             return {"ok": False, "ms": 0, "why": f"join {j.code}"}
-        # 造两段张嘴（opens=(1,2,4,5)），并显式指定 MOUTH_TWICE：
-        # 白名单有 4 个动作（CR-016 加了靠近/离远），随机抽到尺度类动作时
-        # 这套张嘴帧必被 actionCount 拒，压测就会把「抽错动作」记成「系统失败」。
-        base, frames, _ = flows.checkin_frames(student["person"], n=8)
+        # 造一套「靠近」序列并显式指定 MOVE_CLOSER（CR-018 后动作库只剩尺度类）：
+        # 压测量的是吞吐与并发，不能让「随机抽到另一个动作」被记成「系统失败」。
+        base, frames, _ = flows.checkin_frames_scale(student["person"], closer=True)
         res = flows.run_challenge(face, j.data["checkinTicket"], frames,
-                                  action="MOUTH_TWICE", baseline=base)
+                                  action="MOVE_CLOSER", baseline=base)
         ms = (time.perf_counter() - t0) * 1000
         ok = res.get("passed") is True and res.get("attendanceStatus") in ("PRESENT", "LATE")
         return {"ok": ok, "ms": ms, "why": None if ok else str(res)[:160]}

@@ -44,7 +44,10 @@ def answer(state: AgentState) -> dict:
         return {"answer": "我没有查到可用的数据。可以换个说法，或先在列表页确认数据是否存在。"}
 
     body = _compose(results)
-    polished = _polish(state.get("query") or "", body)
+    # 导出类回答里有一句「点消息下方的下载按钮」——这是操作指引，不是措辞。
+    # 让模型润色会把「下方」改成「右侧/附件区」，用户照着找会找不到。
+    polished = body if any(r.get("tool") == "export_attendance" for r in results) \
+        else _polish(state.get("query") or "", body)
     footer = _citations(results)
 
     text = polished
@@ -158,6 +161,15 @@ def _describe(tool: str, result: Any) -> str:
     if tool == "summarize_session":
         return str(result.get("text") or "")
 
+    if tool == "export_attendance":
+        rows = int(result.get("rowCount") or 0)
+        name = result.get("fileName") or "考勤记录.xlsx"
+        if rows == 0:
+            return (f"该范围内没有考勤记录。已生成仅含表头的「{name}」，"
+                    f"可以打开确认筛选条件是否符合预期。")
+        return (f"已生成「{name}」，共 {rows} 行（缺勤行已整行红底高亮）。"
+                f"点消息下方的「下载 Excel」保存文件。")
+
     if tool == "draft_import_students":
         return (f"导入预览：共 {result.get('total')} 行，新增 {result.get('willCreate')}，"
                 f"更新 {result.get('willUpdate')}，失败 {result.get('failed')}。")
@@ -209,5 +221,11 @@ def _count(result: Any, error: Any) -> int:
             value = result.get(key)
             if isinstance(value, list):
                 return len(value)
+        # 与 tool_node._count 保持同一口径：found=false 就是 0 条，
+        # 否则「未查询到该学生」后面会跟一句「命中 1 条」。
+        if result.get("found") is False:
+            return 0
+        if isinstance(result.get("rowCount"), int):
+            return int(result["rowCount"])
         return 1
     return 1 if result else 0

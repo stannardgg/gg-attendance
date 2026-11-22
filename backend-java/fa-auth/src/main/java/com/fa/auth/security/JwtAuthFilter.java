@@ -24,23 +24,31 @@ import org.springframework.web.filter.OncePerRequestFilter;
 /**
  * JWT 鉴权过滤器。
  *
- * <p>两个刻意的行为：
+ * <p>五个刻意的行为：
  * ① <b>没带令牌就放行</b>（匿名），由 SecurityConfig 的授权规则和 EntryPoint 决定是否 401。
  * 这样 permitAll 的端点（登录、健康检查）不用特判。
  * ② <b>带了令牌但无效/过期，直接返回 401 FA-1002</b>，不继续往下走。
  * 否则会先被当成匿名，最后报 403 FA-1003——前端会把「登录过期」显示成「权限不足」，
  * 用户完全不知道该重新登录。
+ * ③ <b>角色以数据库为准</b>（{@link AccountRoleResolver}），不用令牌里的 role 快照。
+ * 令牌只证明"你是谁"；否则库里改了角色/停用账号，旧令牌在 30 分钟内仍按旧权限放行，
+ * 而 /auth/me 读库，界面与接口就会互相矛盾（管理员看到「权限不足」正是这一类）。
+ * ④ <b>账号被停用与令牌失效同样处理</b>（401），让前端统一回登录页，
+ * 登录时再由 AuthService 给出「账号已停用」的明确文案。
  */
 @Component
 public class JwtAuthFilter extends OncePerRequestFilter {
 
     private final JwtUtil jwtUtil;
     private final TokenBlacklist blacklist;
+    private final AccountRoleResolver roleResolver;
     private final ObjectMapper objectMapper;
 
-    public JwtAuthFilter(JwtUtil jwtUtil, TokenBlacklist blacklist, ObjectMapper objectMapper) {
+    public JwtAuthFilter(JwtUtil jwtUtil, TokenBlacklist blacklist,
+                         AccountRoleResolver roleResolver, ObjectMapper objectMapper) {
         this.jwtUtil = jwtUtil;
         this.blacklist = blacklist;
+        this.roleResolver = roleResolver;
         this.objectMapper = objectMapper;
     }
 
@@ -68,13 +76,24 @@ public class JwtAuthFilter extends OncePerRequestFilter {
             return;
         }
 
+        var snapshot = roleResolver.resolve(payload.accountId());
+        if (snapshot == null || !snapshot.active()) {
+            writeUnauthorized(response);
+            return;
+        }
+        // ⑤ 凭据版本不符 = 改过密码或登录名，这张令牌是"上一个凭据"签的，必须重登。
+        if (payload.credentialVersion() != snapshot.credentialVersion()) {
+            writeUnauthorized(response);
+            return;
+        }
+
         CurrentUser user = new CurrentUser(
-                payload.accountId(), payload.username(), payload.role(),
+                payload.accountId(), payload.username(), snapshot.role(),
                 payload.teacherId(), payload.studentId(),
                 payload.jti(), payload.tokenType());
 
         var authentication = new UsernamePasswordAuthenticationToken(
-                user, null, List.of(new SimpleGrantedAuthority("ROLE_" + payload.role())));
+                user, null, List.of(new SimpleGrantedAuthority("ROLE_" + snapshot.role())));
         SecurityContextHolder.getContext().setAuthentication(authentication);
 
         try {

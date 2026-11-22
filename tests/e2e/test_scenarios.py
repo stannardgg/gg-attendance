@@ -22,14 +22,26 @@ from e2e_client import Client
 
 # ---------------------------------------------------------------- 工具
 def do_checkin(world, key: str, sid: int, *, action: str | None = None,
-               opens: tuple[int, ...] = (1, 2, 4, 5), frames=None, baseline=None):
-    """进入签到 → 拿票据 → 开始挑战 → 逐帧 → finish。返回 finish 的 data。"""
+               frames=None, baseline=None):
+    """进入签到 → 拿票据 → 开始挑战 → 逐帧 → finish。返回 finish 的 data。
+
+    造帧按 action 自动匹配：MOVE_CLOSER / MOVE_AWAY 用尺度序列，EYE_CLOSE 用
+    「闭一下再睁开」序列，转头与 **未指定 action**（交给服务端随机）都用静止帧
+    —— 合成素材造不出真实偏航，而随机动作下的"没做动作"就是静止不动。
+    """
     st = world.students[key]
     j = flows.join(st["client"], sid)
     assert j.status == 200, f"join 失败：{j.status} {j.body}"
     assert j.data["challengeRequired"] is True
     if frames is None:
-        base, frames, _ = flows.checkin_frames(st["person"], opens)
+        if action == "MOVE_AWAY":
+            base, frames, _ = flows.checkin_frames_scale(st["person"], closer=False)
+        elif action == "MOVE_CLOSER":
+            base, frames, _ = flows.checkin_frames_scale(st["person"], closer=True)
+        elif action == "EYE_CLOSE":
+            base, frames, _ = flows.checkin_frames_eye(st["person"])
+        else:
+            base, frames, _ = flows.checkin_frames_static(st["person"])
         baseline = base if baseline is None else baseline
     return flows.run_challenge(world.face, j.data["checkinTicket"], frames,
                                action=action, baseline=baseline)
@@ -63,7 +75,7 @@ def test_01_正常签到(world, events, facts):
     live = events(s["id"], world.teacher.token)
     live.wait_for("EVT_CONNECTED", 2.0)
 
-    res = do_checkin(world, "s1", s["id"], action="MOUTH_TWICE")
+    res = do_checkin(world, "s1", s["id"], action="MOVE_CLOSER")
     assert res.get("passed") is True, res
     assert res["attendanceStatus"] == "PRESENT", res
 
@@ -88,7 +100,7 @@ def test_02_迟到签到(world, facts):
                             late_after_sec=1)
     facts["s02"] = s["id"]
     time.sleep(2.2)
-    res = do_checkin(world, "s2", s["id"], action="MOUTH_TWICE")
+    res = do_checkin(world, "s2", s["id"], action="MOVE_CLOSER")
     assert res.get("passed") is True, res
     assert res["attendanceStatus"] == "LATE"
 
@@ -108,7 +120,7 @@ def test_04_重复签到(world, facts):
     """同一学生第二次进入并提交 → FA-3003，且只留 1 条考勤。"""
     s = flows.start_session(world.teacher, world.class_id, world.course_id, "场景04")
     facts["s04"] = s["id"]
-    res = do_checkin(world, "s1", s["id"], action="MOUTH_TWICE")
+    res = do_checkin(world, "s1", s["id"], action="MOVE_CLOSER")
     assert res.get("passed") is True, res
     again = flows.join(world.students["s1"]["client"], s["id"])
     # FA-3003 = 409 Conflict（已经签过，不是参数错）
@@ -144,24 +156,30 @@ def test_06_画面两人(world):
     assert flows.attendance_of(st["client"], s["id"]).status == 404
 
 
-def test_08_要求两次只做一次(world):
-    """MOUTH_TWICE 只张一次 → FA-4003，且回落「只检测到 1 次，要求 2 次」的数值。"""
+def test_08_要求靠近但没动(world):
+    """要求 MOVE_CLOSER 但画面完全静止 → FA-4003，数值回传 0/1。
+
+    CR-018 停用嘴部动作后动作库没有 need=2 的动作，本场景由「要求两次只做一次」
+    改为「要求靠近但完全没动」：测的仍是 actionCount 门禁的数值归因，
+    只是不再出现 1/2 这种形态。
+    """
     s = flows.start_session(world.teacher, world.class_id, world.course_id, "场景08")
-    # 连张 2 帧才算「一次」（hold_frames=2）；只发 1 帧暗画面等于没张嘴
-    res = do_checkin(world, "s3", s["id"],
-                     action="MOUTH_TWICE", opens=(2, 3))
-    assert res["action"] == "MOUTH_TWICE"
+    base = synth.composite(synth.person_images(world.students["s3"]["person"])[0])
+    res = do_checkin(world, "s3", s["id"], action="MOVE_CLOSER",
+                     frames=[base] * 8, baseline=base)
+    assert res["action"] == "MOVE_CLOSER"
     assert res["passed"] is False and res["rejectGate"] == "actionCount", res
     gate = res["gates"]["actionCount"]
-    assert gate["value"] == 1 and gate["threshold"] == 2, gate
+    assert gate["value"] == 0 and gate["threshold"] == 1, gate
 
 
 def test_09_失败后申诉推送(world, events, facts):
     """签到失败 → 学生申诉 → 教师端 1 秒内收到提醒，申诉进列表。"""
     s = flows.start_session(world.teacher, world.class_id, world.course_id, "场景09")
     facts["s09"] = s["id"]
-    res = do_checkin(world, "s3", s["id"],
-                     action="MOUTH_TWICE", opens=(2, 3))
+    base = synth.composite(synth.person_images(world.students["s3"]["person"])[0])
+    res = do_checkin(world, "s3", s["id"], action="MOVE_CLOSER",
+                     frames=[base] * 8, baseline=base)
     assert res["passed"] is False
 
     live = events(s["id"], world.teacher.token)
@@ -249,29 +267,33 @@ def test_12_Agent查询班级统计(world):
 
 
 def test_13_基线污染不误拒(world):
-    """学生一看到指令就先张嘴、基线帧已经是张嘴状态，仍必须判通过。"""
+    """学生看到指令就先靠近、基线帧已经贴近，仍必须判通过。
+
+    判据是「相对基线的变化」：基线偏高（已是大脸）不能让真实动作失效——
+    这是 CR-016 §6 已知限制 4 在尺度动作上的等价保护（原用例是「基线已经张嘴」）。
+    """
     s = flows.start_session(world.teacher, world.class_id, world.course_id, "场景13")
     images = synth.person_images(world.students["s2"]["person"])
-    base = synth.composite(images[0])
-    bbox = synth.largest_bbox(base)
-    opened = synth.open_mouth(base, bbox)
-    # baseline = 张嘴（污染）；序列里两次张嘴各保持 2 帧（hold_frames=2）
-    frames = [base, base, opened, opened, base, base, opened, opened]
-    res = do_checkin(world, "s2", s["id"], action="MOUTH_TWICE",
-                     frames=frames, baseline=opened)
+    base = synth.composite(images[0], side=380)     # 基线已经贴近
+    moved = synth.composite(images[0], side=470)    # 再靠近约 24%
+    frames = [base] * 4 + [moved] * 4
+    res = do_checkin(world, "s2", s["id"], action="MOVE_CLOSER",
+                     frames=frames, baseline=base)
     assert res.get("passed") is True, res
-    assert res["detectedAction"] >= 2, res
+    assert res["detectedAction"] >= 1, res
 
 
 def test_14_背景小脸不误拦(world):
     """身后墙上 40px 的小脸：低于 90px 下限，不该触发 FA-4002。"""
     s = flows.start_session(world.teacher, world.class_id, world.course_id, "场景14")
-    base = synth.composite(world.students["s3"]["images"][0])
+    images = synth.person_images(world.students["s3"]["person"])
     other = synth.composite(world.students["s1"]["images"][0])
+    base = synth.composite(images[0])
+    near = synth.composite(images[0], side=392)     # 靠近约 22%
     frame = synth.with_background_face(base, other, px=40)
-    bbox = synth.largest_bbox(frame)
-    frames = flows.frames_with_opens(frame, bbox, (1, 2, 4, 5), 8)
-    res = do_checkin(world, "s3", s["id"], action="MOUTH_TWICE",
+    moved = synth.with_background_face(near, other, px=40)
+    frames = [frame] * 4 + [moved] * 4
+    res = do_checkin(world, "s3", s["id"], action="MOVE_CLOSER",
                      frames=frames, baseline=frame)
     assert res.get("code") != "FA-4002", res
     assert res.get("passed") is True, res
@@ -366,13 +388,56 @@ def test_07_照片翻拍被拒(world):
 
     断言是 passed=False 而不是指定 rejectGate：翻拍帧的活体分**因身份而异**
     （实测同一套合成参数下 0.02~0.75 都有——旧结论"0.02~0.10"只是当初抽到的
-    几个身份），活体这道门禁不一定拦得住；但动作门禁（翻拍不张嘴）必然拦住，
-    三道 AND 的语义下攻击仍然进不去。活体单门禁的拒绝率证据在 WP-06 的
-    照片攻击探针（原始照片 100% / 全部 96%），那才是对活体模型本身的专项。
+    几个身份），活体这道门禁不一定拦得住；但动作门禁必然拦住——翻拍拍的是静止画面，
+    三类判据（尺度变化 / 眼睑开合 / 偏航）都是"相对基线的位移"，静止画面一帧都
+    凑不出来（CR-018 前是"翻拍不张嘴"），三道 AND 的语义下攻击仍然进不去。活体单门禁
+    的拒绝率证据在 WP-06 的照片攻击探针（原始照片 100% / 全部 96%），那才是对活体
+    模型本身的专项。
     """
     s = flows.start_session(world.teacher, world.class_id, world.course_id, "场景07")
-    res = do_checkin(world, "s1", s["id"], opens=())
+    res = do_checkin(world, "s1", s["id"])
     assert res.get("passed") is False, res
     assert res["rejectGate"], res          # 误拒必须可归因（§6.5），写清是哪道门禁拦的
     assert res["similarity"] is not None
     assert flows.attendance_of(world.students["s1"]["client"], s["id"]).status == 404
+
+
+# ---------------------------------------------------------------- CR-021 新增场景
+
+def test_19_闭眼保持判通过(world):
+    """要求 EYE_CLOSE：闭眼 4 帧（≥2 帧 hold）→ 判通过。
+
+    这条同时验证「眼框在 192 空间锁定、跨帧复用」是对的：合成闭眼涂的就是
+    服务端量到的那块区域，如果 ROI 漂了，暗度降幅就出不来。
+    """
+    s = flows.start_session(world.teacher, world.class_id, world.course_id, "场景19")
+    res = do_checkin(world, "s2", s["id"], action="EYE_CLOSE")
+    assert res["action"] == "EYE_CLOSE", res
+    assert res.get("passed") is True, res
+    assert res["detectedAction"] == 1, res
+
+
+def test_20_要求闭眼但一直睁眼(world):
+    """要求 EYE_CLOSE 但全程睁眼 → FA-4003，数值回传 0/1。"""
+    s = flows.start_session(world.teacher, world.class_id, world.course_id, "场景20")
+    base, frames, _ = flows.checkin_frames_static(world.students["s2"]["person"], n=10)
+    res = do_checkin(world, "s2", s["id"], action="EYE_CLOSE",
+                     frames=frames, baseline=base)
+    assert res["passed"] is False and res["rejectGate"] == "actionCount", res
+    gate = res["gates"]["actionCount"]
+    assert gate["value"] == 0 and gate["threshold"] == 1, gate
+
+
+def test_21_要求转头但没动(world):
+    """要求 TURN_LEFT 但画面静止 → FA-4003。
+
+    转头在 E2E 只验负例：正面静图做不出真实偏航（鼻尖是平面贴图，投影变换
+    不会让它相对双眼中点位移）。正例由计数器单测与 probe_action.py --pose 覆盖。
+    """
+    s = flows.start_session(world.teacher, world.class_id, world.course_id, "场景21")
+    base, frames, _ = flows.checkin_frames_static(world.students["s3"]["person"])
+    res = do_checkin(world, "s3", s["id"], action="TURN_LEFT",
+                     frames=frames, baseline=base)
+    assert res["action"] == "TURN_LEFT", res
+    assert res["passed"] is False and res["rejectGate"] == "actionCount", res
+    assert res["gates"]["actionCount"]["value"] == 0, res

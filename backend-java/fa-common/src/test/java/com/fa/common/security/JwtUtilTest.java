@@ -33,7 +33,7 @@ class JwtUtilTest {
     @DisplayName("签发的 access 能被解析，字段完整")
     void issueAndParse() {
         JwtUtil jwt = util(1800);
-        String token = jwt.issueAccess(7L, "S2024001", "STUDENT", null, 3L);
+        String token = jwt.issueAccess(7L, "S2024001", "STUDENT", null, 3L, 0);
 
         Claims claims = jwt.parse(token);
         TokenPayload payload = jwt.toPayload(claims);
@@ -43,6 +43,7 @@ class JwtUtilTest {
         assertThat(payload.role()).isEqualTo("STUDENT");
         assertThat(payload.studentId()).isEqualTo(3L);
         assertThat(payload.teacherId()).isNull();
+        assertThat(payload.credentialVersion()).isZero();
         assertThat(payload.tokenType()).isEqualTo(JwtUtil.TYPE_ACCESS);
         assertThat(payload.jti()).isNotBlank();
     }
@@ -51,7 +52,7 @@ class JwtUtilTest {
     @DisplayName("过期令牌抛 ExpiredJwtException，且 isExpired 返回 true")
     void expired() {
         JwtUtil jwt = util(-10);
-        String token = jwt.issueAccess(1L, "admin", "ADMIN", null, null);
+        String token = jwt.issueAccess(1L, "admin", "ADMIN", null, null, 0);
 
         assertThatThrownBy(() -> jwt.parse(token)).isInstanceOf(ExpiredJwtException.class);
         assertThat(jwt.isExpired(token)).isTrue();
@@ -62,7 +63,7 @@ class JwtUtilTest {
     @DisplayName("签名字节被改动后必须拒绝")
     void tamperedSignature() {
         JwtUtil jwt = util(1800);
-        String token = jwt.issueAccess(1L, "admin", "ADMIN", null, null);
+        String token = jwt.issueAccess(1L, "admin", "ADMIN", null, null, 0);
 
         // 改最后一个字符：Base64URL 的末位有填充位，改它不一定影响解码，
         // 所以改倒数第 3 个字符更可靠地破坏签名
@@ -81,7 +82,7 @@ class JwtUtilTest {
                 Duration.ofMinutes(30), Duration.ofDays(7));
         JwtUtil verifier = util(1800);
 
-        String token = issuer.issueAccess(1L, "admin", "ADMIN", null, null);
+        String token = issuer.issueAccess(1L, "admin", "ADMIN", null, null, 0);
         assertThatThrownBy(() -> verifier.parse(token)).isInstanceOf(JwtException.class);
     }
 
@@ -115,9 +116,31 @@ class JwtUtilTest {
     @DisplayName("access 与 refresh 的 typ 可区分")
     void tokenType() {
         JwtUtil jwt = util(1800);
-        assertThat(jwt.toPayload(jwt.parse(jwt.issueAccess(1L, "u", "TEACHER", 2L, null))).tokenType())
+        assertThat(jwt.toPayload(jwt.parse(jwt.issueAccess(1L, "u", "TEACHER", 2L, null, 0))).tokenType())
                 .isEqualTo(JwtUtil.TYPE_ACCESS);
-        assertThat(jwt.toPayload(jwt.parse(jwt.issueRefresh(1L, "u", "TEACHER", 2L, null))).tokenType())
+        assertThat(jwt.toPayload(jwt.parse(jwt.issueRefresh(1L, "u", "TEACHER", 2L, null, 0))).tokenType())
                 .isEqualTo(JwtUtil.TYPE_REFRESH);
+    }
+
+    @Test
+    @DisplayName("凭据版本随签发写入；缺失该 claim 的旧令牌按 0 处理")
+    void credentialVersion() {
+        JwtUtil jwt = util(1800);
+        assertThat(jwt.toPayload(jwt.parse(jwt.issueAccess(1L, "u", "TEACHER", 2L, null, 3)))
+                .credentialVersion()).isEqualTo(3);
+
+        // 升级前签发的令牌没有 cv：不能被当成「版本不符」而全体掉线
+        String legacy = Jwts.builder()
+                .issuer("gg-attendance")
+                .subject("1")
+                .id("jti-legacy")
+                .issuedAt(Date.from(Instant.now()))
+                .expiration(Date.from(Instant.now().plusSeconds(600)))
+                .claim(JwtUtil.CLAIM_USERNAME, "u")
+                .claim(JwtUtil.CLAIM_ROLE, "TEACHER")
+                .claim(JwtUtil.CLAIM_TOKEN_TYPE, JwtUtil.TYPE_ACCESS)
+                .signWith(Keys.hmacShaKeyFor(SECRET.getBytes(StandardCharsets.UTF_8)))
+                .compact();
+        assertThat(jwt.toPayload(jwt.parse(legacy)).credentialVersion()).isZero();
     }
 }

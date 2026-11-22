@@ -11,8 +11,10 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from app.challenge.action import MouthActionCounter, ScaleActionCounter
-from app.challenge.store import SCALE_ACTIONS, ChallengeState
+from app.challenge.action import EyeCloseCounter, MouthActionCounter, ScaleActionCounter, TurnActionCounter
+from app.challenge.store import (
+    EYE_ACTIONS, SCALE_ACTIONS, TURN_ACTIONS, TURN_DIRECTIONS, ChallengeState,
+)
 from app.config import settings
 from app.engine.landmark import cosine_similarity
 
@@ -55,10 +57,41 @@ def gate_action(st: ChallengeState) -> tuple[GateResult, int, int]:
     返回 (result, detected, required)。FA-4003 的 hint 要给出具体数值
     （「只检测到 1 次，要求 2 次」），所以 detected/required 必须单独返回。
 
-    两类判据：嘴部动作看 ROI 暗度（§4.4.2），尺度动作看检测框尺寸（§4.4.1）。
-    尺度类没有基线就无从判起——不做「序列首帧顶上」，那正是 4.4.2 明令禁止的
-    基线污染（学生已经在做动作，首帧就是污染值）。
+    四类判据：嘴部看 ROI 暗度、尺度看检测框尺寸、闭眼看眼框暗度、
+    转头看 5 点偏航代理（§4.4.1）。除嘴部外都**强依赖基线**——不做「序列首帧
+    顶上」，那正是 4.4.2 明令禁止的基线污染（学生已经在做动作，首帧就是污染值）。
     """
+    if st.action in TURN_ACTIONS:
+        if not st.yaws:
+            return GateResult(False, 0.0, float(st.need)), 0, st.need
+        counter = TurnActionCounter(
+            base_yaw=st.baseline_yaw,
+            direction=TURN_DIRECTIONS.get(st.action, 1),
+            delta=settings.action.turn_delta,
+            hold_frames=settings.action.turn_hold_frames,
+        )
+        for y in st.yaws:
+            counter.observe(y)
+        detected, _ = counter.result()
+        return (GateResult(detected >= st.need, float(detected), float(st.need)),
+                detected, st.need)
+
+    if st.action in EYE_ACTIONS:
+        if st.baseline_eye <= 0 or not st.eyes:
+            # 眼区基线不可得 → 判不了。返回 0/1 而不是抛错：finish 要出可归因的结论。
+            return GateResult(False, 0.0, float(st.need)), 0, st.need
+        counter = EyeCloseCounter(
+            base_ratio=st.baseline_eye,
+            abs_drop=settings.action.eye_dark_drop,
+            drop_ratio=settings.action.eye_drop_ratio,
+            hold_frames=settings.action.eye_hold_frames,
+        )
+        for e in st.eyes:
+            counter.observe(e)
+        detected, _ = counter.result()
+        return (GateResult(detected >= st.need, float(detected), float(st.need)),
+                detected, st.need)
+
     if st.action in SCALE_ACTIONS:
         if st.baseline_scale <= 0:
             return GateResult(False, 0.0, float(st.need)), 0, st.need

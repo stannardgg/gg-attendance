@@ -92,6 +92,7 @@ class GateConfig:
 class ActionConfig:
     """动作可测性判据（§4.4.2）。全部由 probe_action.py 实测得出，勿凭感觉调。"""
 
+    # CR-018：以下嘴部阈值目前不参与生产判定（白名单已无 MOUTH_*），保留仅供回滚。
     mouth_dark_abs: float = 0.05
     mouth_rise_ratio: float = 1.45
     # 连续多少帧达到阈值才算「一次」张嘴。契约值 2 的前提是 4fps 采集+
@@ -119,11 +120,38 @@ class ActionConfig:
     # 命中门槛的动作不参与随机（否则学生物理上做不到，判失败是我们的错）。
     scale_closer_max_frac: float = 0.80      # 人脸长边 / 画面高，超过则不做「靠近」
     scale_away_min_px: float = 70.0          # 缩 18% 后仍 ≥70px 才允许「离远」
+    # 闭眼（CR-021）：眼框暗像素占比相对基线下降。0.06 来自 80 个身份的实测
+    # （`probe_action.py --eye`：闭眼降幅 0.178±0.065，静止抖动 std=0.0152 → 3.9σ；
+    # 75/80 达标，未达标的 5 例里 1 例被下面的基线门槛挡在抽签之外）；
+    # drop_ratio 再要求落到基线的 60% 以下，避免「本来就很暗的眼睛」靠绝对量过关。
+    eye_dark_drop: float = field(default_factory=lambda: _get_float("EYE_DARK_DROP", 0.06))
+    eye_drop_ratio: float = field(default_factory=lambda: _get_float("EYE_DROP_RATIO", 0.60))
+    eye_hold_frames: int = field(default_factory=lambda: _get_int("EYE_HOLD_FRAMES", 2))
+    # 可做性门槛：基线眼区太暗（浓妆/逆光）就没有下降空间；瞳距太小（人太远）
+    # 眼框只有十几个像素，统计量不可信。命中门槛的动作不参与随机。
+    eye_base_min: float = 0.10
+    eye_min_iod_px: float = 45.0
+    # 转头（CR-021）：偏航代理 = 鼻尖相对双眼中点的横向偏移 / 瞳距。
+    # 0.12 对应约 24°（按鼻尖前凸 0.30×瞳距估算）；静止抖动 std=0.0104 → 11.5σ。
+    # 整帧滚转 ±15/±30° 的漂移 mean 0.030 / max 0.108 —— 极端歪头仍可能被算成
+    # 转头，这是**单向**的误放行（不会误拒），代价可接受，见 CR-021「已知限制」。
+    turn_delta: float = field(default_factory=lambda: _get_float("TURN_DELTA", 0.12))
+    turn_hold_frames: int = field(default_factory=lambda: _get_int("TURN_HOLD_FRAMES", 2))
+    # 基线已经明显偏头（|代理| > 0.10）时，不再要求「继续往同侧转」——
+    # 再转 20° 会滑出检测范围，学生照做反而被 FA-4001 中止。
+    turn_base_max: float = 0.10
+    window_ms_eye: int = field(default_factory=lambda: _get_int("WINDOW_MS_EYE", 3000))
+    window_ms_turn: int = field(default_factory=lambda: _get_int("WINDOW_MS_TURN", 2500))
     # 白名单可用 FA_ACTION_WHITELIST 覆盖（逗号分隔）：
     # 新动作在真机标定完成前，运维可以不重建镜像就把它们摘下来。
+    #
+    # CR-018：嘴部动作（MOUTH_ONCE / MOUTH_TWICE）已整体停用（产品决定：签到不再
+    # 要求学生张嘴）。CR-021 增加闭眼与左右转头，白名单回到 5 个。
+    # 回滚嘴部动作只需把 MOUTH_* 加回本变量并重建 face 容器。
     action_whitelist: tuple = field(default_factory=lambda: tuple(
         s.strip() for s in _get(
-            "ACTION_WHITELIST", "MOUTH_ONCE,MOUTH_TWICE,MOVE_CLOSER,MOVE_AWAY"
+            "ACTION_WHITELIST",
+            "MOVE_CLOSER,MOVE_AWAY,EYE_CLOSE,TURN_LEFT,TURN_RIGHT"
         ).split(",") if s.strip()))
     # CR-010：挑战动作允许由请求指定。**默认关闭**——动作随机是防预录视频的一道
     # 保险，让客户端能自选动作等于把这道保险交回给攻击者。只有验收/联调环境

@@ -7,7 +7,8 @@
  *    字号用 clamp() 跟视口走，名单区放不下就用「还有 N 人」收口而不是滚动。
  * 2. 班级名与课程名必须并列常驻 —— 教师最容易出的错就是选反了班级和课程。
  *
- * 取消二维码后左栏不再是码，而是「学生端怎么进来」的三步指引。
+ * 取消二维码后左栏只剩大字倒计时：学生端入口地址与入场步骤属于教师口头交代的内容，
+ * 投在墙上对已经在场的观众没有信息量，反而挤占名单墙的宽度。
  */
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
@@ -25,8 +26,6 @@ const now = ref(Date.now())
 const connected = ref(false)
 const lastHit = ref<{ name: string; status: string; at: number } | null>(null)
 const loading = ref(true)
-/** 学生端入口：与 deploy/nginx 的 /m/ 前缀一致 */
-const mobileUrl = `${location.origin}/m/`
 
 let ws: WebSocket | null = null
 let rosterTimer: number | undefined
@@ -255,20 +254,12 @@ const remainText = computed(() => {
     </header>
 
     <main class="body">
-      <!-- 左：学生端入口指引（不再投屏二维码） -->
+      <!-- 左：只剩大字倒计时，不再贴入口地址与入场步骤 -->
       <section class="entry-panel">
-        <div class="entry-title">学生端直接签到</div>
         <div class="remain">
           <span class="num" :class="{ over: remainSec === 0 }">{{ remainText }}</span>
           <span class="unit">{{ remainSec === 0 ? '已结束' : '剩余' }}</span>
         </div>
-        <ol class="steps">
-          <li>用手机打开学生端并登录</li>
-          <li>在「进行中的签到」里点本场</li>
-          <li>按提示正对镜头刷脸</li>
-        </ol>
-        <div class="entry-url">{{ mobileUrl }}</div>
-        <div class="entry-hint">无需扫码 · 人脸活体与动作校验</div>
       </section>
 
       <!-- 右：实时人数与姓名墙 -->
@@ -400,7 +391,7 @@ const remainText = computed(() => {
   flex: 1 1 auto;
   min-height: 0;
   display: grid;
-  grid-template-columns: minmax(300px, 36%) 1fr;
+  grid-template-columns: minmax(240px, 26%) 1fr;
   gap: 2vw;
   padding: 0 2vw 2vh;
 }
@@ -416,20 +407,6 @@ const remainText = computed(() => {
   padding: 2vh 2vw;
   min-height: 0;
   text-align: center;
-}
-.entry-title {
-  font-size: clamp(20px, 2vw, 36px);
-  font-weight: 700;
-  color: #f8fafc;
-  letter-spacing: 1px;
-}
-.steps {
-  margin: 0;
-  padding-left: 1.2em;
-  text-align: left;
-  color: #cbd5e1;
-  font-size: clamp(13px, 1.05vw, 20px);
-  line-height: 2;
 }
 .remain {
   display: flex;
@@ -451,20 +428,6 @@ const remainText = computed(() => {
 .remain .unit {
   font-size: clamp(12px, 1vw, 18px);
   color: #64748b;
-}
-.entry-url {
-  margin-top: 0.6vh;
-  padding: 0.9vh 1vw;
-  border-radius: 8px;
-  background: #16233d;
-  border: 1px solid #22304d;
-  color: #38bdf8;
-  font-size: clamp(12px, 1vw, 18px);
-  word-break: break-all;
-}
-.entry-hint {
-  color: #64748b;
-  font-size: clamp(11px, 0.9vw, 15px);
 }
 
 .live-panel {

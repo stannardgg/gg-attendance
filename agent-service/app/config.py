@@ -44,6 +44,11 @@ class Settings:
     tool_timeout_sec: int
     tool_max_retry: int
 
+    # 历史会话（默认与 checkpoint 同实例，独立前缀）
+    history_url: str
+    history_ttl_sec: int
+    history_max_convs: int
+
     # 能力级别默认值（实际以 Java 下发的 catalog 为准）
     level_l0: bool
     level_l1: bool
@@ -76,6 +81,9 @@ def load_settings() -> Settings:
         llm_timeout_sec=float(os.getenv("LLM_TIMEOUT_SEC", "60")),
         checkpoint_url=os.getenv("REDIS_CHECKPOINT_URL", "redis://127.0.0.1:6379/2"),
         checkpoint_ttl_sec=_int("CHECKPOINT_TTL_SEC", 86400),
+        history_url=os.getenv("REDIS_HISTORY_URL", os.getenv("REDIS_CHECKPOINT_URL", "redis://127.0.0.1:6379/2")),
+        history_ttl_sec=_int("HISTORY_TTL_SEC", 604800),
+        history_max_convs=_int("HISTORY_MAX_CONVS", 20),
         recursion_limit=_int("GRAPH_RECURSION_LIMIT", 12),
         tool_timeout_sec=_int("TOOL_TIMEOUT_SEC", 8),
         tool_max_retry=_int("TOOL_MAX_RETRY", 1),

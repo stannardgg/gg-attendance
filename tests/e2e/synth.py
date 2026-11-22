@@ -69,10 +69,15 @@ def person_images(person: str) -> list[np.ndarray]:
     return imgs
 
 
-def composite(img112: np.ndarray, size: tuple[int, int] = FRAME_SIZE) -> np.ndarray:
-    """把人脸居中放到 720×1280 的灰底画面上，短边放大到 320px。"""
+def composite(img112: np.ndarray, size: tuple[int, int] = FRAME_SIZE,
+              side: int = 320) -> np.ndarray:
+    """把人脸居中放到 720×1280 的灰底画面上，短边放大到 `side` px。
+
+    `side` 用来造尺度类动作（CR-016/CR-018）：同一张脸按不同 side 重贴，
+    检测框会随真实尺寸一起变，正是「靠近 / 离远」判据要的信号。
+    """
     frame = blank(size)
-    scale = 320 / min(img112.shape[:2])
+    scale = side / min(img112.shape[:2])
     face = cv2.resize(img112, (int(img112.shape[1] * scale), int(img112.shape[0] * scale)),
                       interpolation=cv2.INTER_CUBIC)
     fh, fw = face.shape[:2]
@@ -143,6 +148,63 @@ def open_mouth(frame: np.ndarray, bbox) -> np.ndarray:
     out = frame.copy()
     cv2.ellipse(out, (int(cx), int(cy)), (int(w * 0.8 / 2), int(h * 0.5 / 2)),
                 0, 0, 360, (10, 10, 10), -1)
+    return out
+
+
+def eye_rects_image(frame: np.ndarray, face):
+    """把 192 空间的眼框反算回图像坐标，返回 ([(x1,y1,x2,y2)...], 192 空间的 rois)。
+
+    与 mouth_polygon 同一套逆变换：服务端每帧都在 192 对齐空间里取眼框，
+    合成闭眼时必须涂在**同一块**区域上，否则测的就不是判据本身。
+    眼框用 106 点的眼球轮廓（与服务端一致），所以这里要跑一次关键点。
+    """
+    lm = _engine().landmarker()
+    pts, _ = lm.landmarks(frame, face.bbox)
+    rois = lm.eye_rects(pts)
+    inv = cv2.invertAffineTransform(lm.align_matrix(face.bbox))
+    boxes = []
+    for i in range(0, len(rois), 4):
+        x1, y1, x2, y2 = rois[i:i + 4]
+        corners = np.array([[x1, y1], [x2, y1], [x2, y2], [x1, y2]], dtype=np.float64)
+        mapped = np.hstack([corners, np.ones((4, 1))]) @ inv.T
+        boxes.append((int(mapped[:, 0].min()), int(mapped[:, 1].min()),
+                      int(mapped[:, 0].max()), int(mapped[:, 1].max())))
+    return boxes, rois
+
+
+def eye_ratio(frame: np.ndarray, face) -> float:
+    """当前画面在服务端口径下的眼框暗度（用于断言合成有效）。"""
+    from app.challenge.action import eye_dark_ratio
+    lm = _engine().landmarker()
+    pts, crop = lm.landmarks(frame, face.bbox)
+    rois = lm.eye_rects(pts)
+    gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+    return eye_dark_ratio(gray, rois)
+
+
+def close_eyes(frame: np.ndarray) -> np.ndarray:
+    """闭眼：眼框填成周围肤色，再压一条 2px 睫毛线。
+
+    为什么不直接涂黑：闭眼是**眼皮盖住虹膜**，暗像素减少而不是增多；
+    涂黑会得到相反方向的信号（v1.x 的 block_eyes 素材就是黑条，只能用于打码测试）。
+    睫毛线保留是因为真实闭眼仍有一条暗的睑缘，不留会把降幅估得过于乐观。
+    """
+    face, _ = largest_face(frame)
+    if face is None:
+        raise RuntimeError("合成闭眼前未检出人脸")
+    boxes, _ = eye_rects_image(frame, face)
+    out = frame.copy()
+    # 肤色取整张脸的**中位色**，不取眼下的"脸颊小块"：后者在脸小/头偏时会落到
+    # 鼻孔或嘴唇上，填出一块深色，把闭眼信号做成反向（实测 010 就是这样）。
+    fx1, fy1, fx2, fy2 = [int(v) for v in face.bbox]
+    fw, fh = max(1, fx2 - fx1), max(1, fy2 - fy1)
+    face_patch = out[fy1 + fh // 10:fy2 - fh // 10, fx1 + fw // 10:fx2 - fw // 10]
+    skin = (np.median(face_patch.reshape(-1, 3), axis=0) if face_patch.size
+            else np.array([170, 170, 170], dtype=np.float64))
+    for (x1, y1, x2, y2) in boxes:
+        out[y1:y2, x1:x2] = skin.astype(np.uint8)
+        cy = (y1 + y2) // 2
+        out[max(cy - 1, 0):cy + 1, x1:x2] = (skin * 0.30).astype(np.uint8)
     return out
 
 

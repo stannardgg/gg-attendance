@@ -125,6 +125,11 @@ public class AuthService {
         if (account == null || !"ACTIVE".equals(account.getStatus())) {
             throw new BizException(ErrorCode.TOKEN_INVALID);
         }
+        // 改过密码/登录名的账号，旧 refresh 也不能再换出新令牌
+        int currentVersion = account.getCredentialVersion() == null ? 0 : account.getCredentialVersion();
+        if (payload.credentialVersion() != currentVersion) {
+            throw new BizException(ErrorCode.TOKEN_INVALID);
+        }
 
         // 旋转：旧 refresh 立即作废，降低被窃取后的窗口
         blacklist.revoke(payload.jti(), jwtUtil.remainingSeconds(refreshToken));
@@ -191,9 +196,10 @@ public class AuthService {
         List<String> permissions = switch (profile.role()) {
             case "ADMIN" -> List.of("teacher:write", "scope:write", "class:write", "course:write",
                     "student:write", "session:write", "attendance:write", "appeal:write",
-                    "audit:read", "config:write", "agent:use");
+                    "audit:read", "config:write", "agent:use", "profile:review");
             case "TEACHER" -> List.of("class:write", "course:write", "student:write",
-                    "session:write", "attendance:write", "appeal:write", "agent:use");
+                    "session:write", "attendance:write", "appeal:write", "agent:use",
+                    "profile:write");
             default -> List.of("checkin:do", "appeal:write");
         };
 
@@ -236,10 +242,11 @@ public class AuthService {
         Long teacherId = teacher == null ? null : teacher.getId();
         Long studentId = student == null ? null : student.getId();
 
+        int credentialVersion = account.getCredentialVersion() == null ? 0 : account.getCredentialVersion();
         String access = jwtUtil.issueAccess(account.getId(), account.getUsername(),
-                account.getRole(), teacherId, studentId);
+                account.getRole(), teacherId, studentId, credentialVersion);
         String refresh = jwtUtil.issueRefresh(account.getId(), account.getUsername(),
-                account.getRole(), teacherId, studentId);
+                account.getRole(), teacherId, studentId, credentialVersion);
 
         return new AuthDtos.TokenData(access, refresh, account.getRole(),
                 jwtUtil.accessTtl().toSeconds(), buildProfile(account.getId()));

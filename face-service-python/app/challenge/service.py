@@ -1,8 +1,10 @@
 """挑战服务：start / frame / finish 的业务编排。
 
 三条设计决定（都来自 §4.4.3 的实测教训）：
-  1. **基线帧缺失不拒绝**：降级为序列首帧并打 baselineDegraded 标记。
-     基线不可得是系统侧问题，让学生白跑一次采集是拿用户体验换工程师的省事。
+  1. **基线必须可判**：白名单里的动作全部是「相对基线的变化」（CR-021 起包括
+     闭眼与转头），没有基线就无从判起，`start` 直接返回 FA-4001 让学生重来，
+     而不是抽一个注定失败的动作再判他不过。只有回滚嘴部动作后才允许
+     "基线缺失降级为首帧"（嘴部判据不依赖基线）。
   2. **ROI 在第一帧锁定**（192 对齐空间坐标），后续帧只跑检测不跑关键点——
      每帧省一次模型调用，也避免关键点漂移把 ROI 带跑。
   3. **所有判定数据存 Redis state**，进程内存只留模型。4 worker 部署时
@@ -17,8 +19,13 @@ import cv2
 import numpy as np
 
 from app.challenge import gates
-from app.challenge.action import face_scale, mouth_dark_ratio
-from app.challenge.store import SCALE_ACTIONS, ChallengeState, ChallengeStore
+from app.challenge.action import (
+    dark_ratio, eye_dark_ratio, face_scale, interocular, yaw_proxy,
+)
+from app.challenge.store import (
+    BASELINE_FREE_ACTIONS, EYE_ACTIONS, SCALE_ACTIONS, TURN_ACTIONS,
+    TURN_DIRECTIONS, ChallengeState, ChallengeStore,
+)
 from app.common.tickets import TicketError, parse
 from app.config import settings
 from app.engine import detector, embedder, landmarker, liveness
@@ -26,19 +33,35 @@ from app.index.vectors import index
 
 logger = logging.getLogger("face-service")
 
-# 指令文案：尺度类动作与嘴部动作的措辞不同（「靠近」没有「几次」的概念）
+# 指令文案：尺度类动作与嘴部动作的措辞不同（「靠近」没有「几次」的概念）。
+# CR-018 起嘴部动作已停用，这两行保留是为了让回滚不必重写文案。
 INSTRUCTIONS = {
     "MOUTH_ONCE": "请张一次嘴，约半秒",
     "MOUTH_TWICE": "请张两次嘴，每次约半秒",
     "MOVE_CLOSER": "请把脸靠近摄像头一点，保持半秒",
     "MOVE_AWAY": "请把脸离摄像头远一点，保持半秒",
+    # CR-021：闭眼而不是眨眼。4fps 采样下眨眼的闭合期（100~300ms）多数落在
+    # 两帧之间，要求连续 2 帧达标时真人做对也判不过——改成"闭住约 1 秒"，
+    # 同一套眼区判据，但不再赌采样运气。
+    "EYE_CLOSE": "请闭上眼睛约 1 秒，再睁开",
+    "TURN_LEFT": "请把头慢慢转向你的左边，约 25 度，保持半秒",
+    "TURN_RIGHT": "请把头慢慢转向你的右边，约 25 度，保持半秒",
 }
 
 # 动作未达成时的实时提示（进度提示由 _hint 统一拼）
 HINTS = {
     "MOVE_CLOSER": "请再靠近一点",
     "MOVE_AWAY": "请再离远一点",
+    "EYE_CLOSE": "请把眼睛闭上，保持住",
+    "TURN_LEFT": "请把头再往左转一点",
+    "TURN_RIGHT": "请把头再往右转一点",
 }
+
+# 已停用的动作码。判据与窗口配置都还在（张嘴族回滚用），但不再参与抽签、
+# 也不接受 action_hint；单独列出来是为了把「已停用」与「拼错了」区分开。
+# BLINK 从来没有实现过（4fps 采样定理），列在这里是因为契约里明确写了它被
+# EYE_CLOSE 取代——联调试 BLINK 时应该看到原因，而不是"未知动作码"。
+RETIRED_ACTIONS = ("MOUTH_ONCE", "MOUTH_TWICE", "BLINK")
 
 
 class ChallengeService:
@@ -58,8 +81,11 @@ class ChallengeService:
 
         baseline_ratio: float | None = None
         baseline_scale = 0.0
+        baseline_eye = 0.0
+        baseline_yaw = 0.0
         degraded = True
         roi: tuple[int, int, int, int] | None = None
+        eye_roi: list[int] | None = None
 
         # 基线污染专项（§4.4.3）：基线帧有多张够大的人脸 → 直接拒绝。
         # 此时无法确定"基线"属于谁，继续做只会把 A 的基线配到 B 的脸上。
@@ -69,22 +95,44 @@ class ChallengeService:
             raise TooManyFaces("基线画面中检测到多张人脸")
 
         face = detector().detect_largest(baseline_bgr)
+        # 基线无脸时的取舍：白名单里只要还有**不依赖基线**的动作（只有已停用的
+        # 嘴部动作属于这一类，回滚时才会出现），就允许降级为首帧继续；
+        # 否则抽到任何动作都必然判失败，不如现在就 FA-4001 让他把脸放进取景框。
+        if face is None and not any(
+                a in BASELINE_FREE_ACTIONS for a in settings.action.action_whitelist):
+            raise NoFace("基线画面中没有检测到人脸")
+
         if face is not None:
             baseline_scale = face_scale(face, baseline_bgr.shape[1])
+            baseline_yaw = yaw_proxy(face)
+            crop = None
+            pts = None
             try:
                 pts, crop = landmarker().landmarks(baseline_bgr, face.bbox)
                 rect = landmarker().mouth_rect(pts)
                 gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
-                baseline_ratio = mouth_dark_ratio(gray[rect[1]:rect[3], rect[0]:rect[2]])
+                baseline_ratio = dark_ratio(gray[rect[1]:rect[3], rect[0]:rect[2]])
                 roi = rect
                 degraded = False
             except ValueError:
                 degraded = True
+            # 眼框优先用 106 点的眼球轮廓（定位更准），关键点模型不可用时退回 5 点。
+            try:
+                boxes = (landmarker().eye_rects(pts) if pts is not None
+                         else landmarker().eye_rects_from_kps(face.kps, face.bbox))
+                if crop is None:
+                    crop = landmarker().align_space(baseline_bgr, face.bbox)
+                baseline_eye = eye_dark_ratio(
+                    cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY), boxes)
+                eye_roi = boxes
+            except ValueError:
+                eye_roi = None
 
-        # 动作必须在基线之后选：尺度类动作的判据就是"相对基线的变化"，
-        # 而且还要看这张脸此刻有没有"靠近 / 离远"的余地（见 _action_eligible）。
+        # 动作必须在基线之后选：所有动作的判据都是"相对基线的变化"，
+        # 而且还要看这张脸此刻有没有做这个动作的余地（见 _action_eligible）。
         # 动作从白名单里**随机**选（§4.4.3）：固定动作等于给预录视频一个稳定的靶子。
-        action = self._pick_action(action_hint, face, baseline_bgr)
+        action = self._pick_action(action_hint, face, baseline_bgr,
+                                   baseline_scale, baseline_eye, baseline_yaw)
 
         st = self.store.create(
             session_id=session_id,
@@ -94,9 +142,14 @@ class ChallengeService:
             baseline_ratio=baseline_ratio if baseline_ratio is not None else 0.02,
             baseline_degraded=degraded,
             baseline_scale=baseline_scale,
+            baseline_eye=baseline_eye,
+            baseline_yaw=baseline_yaw,
         )
         if roi is not None:
             st.roi_x1, st.roi_y1, st.roi_x2, st.roi_y2 = roi
+        if eye_roi:
+            st.eye_roi = eye_roi
+        if roi is not None or eye_roi:
             self.store.save(st)
 
         return {
@@ -110,16 +163,21 @@ class ChallengeService:
             "expiresIn": settings.challenge.ttl_sec,
         }
 
-    def _pick_action(self, hint: str | None, face, frame_bgr: np.ndarray) -> str:
+    def _pick_action(self, hint: str | None, face, frame_bgr: np.ndarray,
+                     baseline_scale: float = 0.0, baseline_eye: float = 0.0,
+                     baseline_yaw: float = 0.0) -> str:
         """随机取动作；仅当显式允许时采纳客户端 hint（CR-010）。
 
         随机前先剔除此刻**物理上做不到**的动作：
-          - 基线帧没有人脸 → 尺度类动作没有基线，判据无从谈起；
-          - 脸已经快占满画面 → 不能要求"再靠近"，学生做不到会被判失败；
-          - 脸太小 → 再离远就检不出人了，等于让他自己触发 FA-4001。
+          - 脸已经快占满画面 → 不能要求"再靠近"；脸太小 → 再离远就检不出人了；
+          - 眼区太暗 / 瞳距太小 → 闭眼的降幅没有可测空间；
+          - 基线已经偏头 → 再往同侧转会滑出检测范围。
         剔除只针对单个动作，不合格的那个退出抽签，其余照旧。
         """
         whitelist = settings.action.action_whitelist
+        if hint and hint in RETIRED_ACTIONS and hint not in whitelist:
+            # 已停用的动作码给明确原因：联调最容易把它当成拼写错误去查白名单
+            raise ValueError(f"动作已停用：{hint}")
         if hint and settings.action.allow_action_hint and hint in whitelist:
             # 验收/联调要能强制指定动作，包括故意指定"做不到"的组合
             return hint
@@ -127,15 +185,35 @@ class ChallengeService:
             # 契约外的动作码直接拒绝，避免把未知值写进 attendance.action_seq
             raise ValueError(f"未知动作码：{hint}")
 
-        candidates = [a for a in whitelist if self._action_eligible(a, face, frame_bgr)]
+        candidates = [a for a in whitelist
+                      if self._action_eligible(a, face, frame_bgr,
+                                               baseline_scale, baseline_eye, baseline_yaw)]
         if not candidates:
-            # 兜底回到嘴部动作：它们不依赖人脸尺度，任何距离都能判
-            candidates = [a for a in whitelist if a not in SCALE_ACTIONS] or list(whitelist)
+            # 极端构图（脸太小 / 已偏头 / 已怼满画面）下可能一个都不合格。
+            # 此时不猜"哪个最可能成"，退回全量白名单并留日志：与其在这里拒绝
+            # 签到，不如让学生试一次——失败还能走申诉，拒绝就是死路。
+            logger.warning(
+                "动作可做性：无候选，退回全量白名单 face=%s scale=%.3f eye=%.3f yaw=%.3f",
+                face is not None, baseline_scale, baseline_eye, baseline_yaw)
+            candidates = list(whitelist)
         return random.choice(candidates)
 
     @staticmethod
-    def _action_eligible(action: str, face, frame_bgr: np.ndarray) -> bool:
-        """该动作在当前画面上是否做得出来。只对尺度类动作有约束。"""
+    def _action_eligible(action: str, face, frame_bgr: np.ndarray,
+                         baseline_scale: float = 0.0, baseline_eye: float = 0.0,
+                         baseline_yaw: float = 0.0) -> bool:
+        """该动作在当前画面上是否做得出来。四类判据各有自己的门槛。"""
+        if action in TURN_ACTIONS:
+            if face is None or abs(baseline_yaw) > settings.action.turn_base_max:
+                return False
+            # 转头会把脸推向画面边缘：左右各留 4% 才要求转，否则一转就出框。
+            frame_w = float(frame_bgr.shape[1])
+            return face.bbox[0] >= 0.04 * frame_w and face.bbox[2] <= 0.96 * frame_w
+        if action in EYE_ACTIONS:
+            if face is None or baseline_eye < settings.action.eye_base_min:
+                return False
+            # 瞳距太小 = 人太远：眼框只有十几像素，暗度统计不可信。
+            return interocular(face) >= settings.action.eye_min_iod_px
         if action not in SCALE_ACTIONS:
             return True
         if face is None:
@@ -210,7 +288,7 @@ class ChallengeService:
             st.roi_x1, st.roi_y1, st.roi_x2, st.roi_y2 = rect
             if st.baseline_degraded:
                 gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
-                st.baseline_ratio = mouth_dark_ratio(
+                st.baseline_ratio = dark_ratio(
                     gray[rect[1]:rect[3], rect[0]:rect[2]])
             # 尺度基线缺失才补：只在 hint 强制指定尺度动作、而基线帧又没检到脸时走到这里
             if st.baseline_scale <= 0:
@@ -219,7 +297,17 @@ class ChallengeService:
         aligned = landmarker().align_space(frame_bgr, face.bbox)
         gray = cv2.cvtColor(aligned, cv2.COLOR_BGR2GRAY)
         roi = gray[st.roi_y1:st.roi_y2, st.roi_x1:st.roi_x2]
-        ratio = mouth_dark_ratio(roi)
+        ratio = dark_ratio(roi)
+
+        # 眼框没锁上（基线帧瞳距太小/关键点异常）→ 拿当前帧补锁，并把这一帧当基线。
+        # 这一帧可能已经闭着眼（基线被污染），EyeCloseCounter 的 max 自愈会兜住。
+        if st.action in EYE_ACTIONS and not st.eye_roi:
+            try:
+                # 这里只补锁一次，且不再跑关键点模型（每帧都跑不划算），用 5 点兜底
+                st.eye_roi = landmarker().eye_rects_from_kps(face.kps, face.bbox)
+                st.baseline_eye = eye_dark_ratio(gray, st.eye_roi)
+            except ValueError:
+                st.eye_roi = []
 
         emb = embedder().embedding(frame_bgr, face.kps)
         if not st.first_emb:
@@ -232,6 +320,16 @@ class ChallengeService:
 
         st.ratios.append(ratio)
         st.scales.append(face_scale(face, frame_bgr.shape[1]))
+        if st.action in EYE_ACTIONS and st.eye_roi:
+            st.eyes.append(eye_dark_ratio(gray, st.eye_roi))
+        if st.action in TURN_ACTIONS:
+            yaw = yaw_proxy(face)
+            st.yaws.append(yaw)
+            # 记下"离基线偏航最近"的那一帧特征：末帧可能是侧脸，拿它做 1:N 会自伤。
+            dev = abs(yaw - st.baseline_yaw)
+            if dev < st.frontal_dev:
+                st.frontal_dev = dev
+                st.frontal_emb = emb.tolist()
         st.seq += 1
         self.store.save(st)
 
@@ -250,6 +348,11 @@ class ChallengeService:
             return {"passed": False, "rejectGate": "no_face",
                     "gates": {}, "similarity": None, "matchedStudentId": None,
                     "detectedAction": 0, "frames": 0, "baselineDegraded": True}
+
+        if st.action in TURN_ACTIONS and st.frontal_emb:
+            # 转头动作的末帧可能是侧脸。身份一致性与 1:N 都改用"最正脸"那一帧，
+            # 否则 similarity 掉下去会冒出与动作无关的 FA-4002（判据在惩罚正确行为）。
+            st.last_emb = st.frontal_emb
 
         l_g = gates.gate_liveness(st)
         i_g = gates.gate_identity(st)
@@ -348,7 +451,7 @@ class ChallengeService:
         if detected >= st.need:
             return None
         if detected == 0:
-            return HINTS.get(st.action, "请张嘴")
+            return HINTS.get(st.action, "请按提示完成动作")
         return f"已检测到 {detected} 次，还需 {st.need - detected} 次"
 
     def _frame_resp(self, st: ChallengeState, accepted: bool, hint: str | None) -> dict:

@@ -97,6 +97,30 @@ export interface TeacherRow {
   courseCount: number
 }
 
+/** 教师账号与资料修改申请（CR-019 / CR-022）。old* 是提交时快照，new* 是申请值。 */
+export interface ProfileRequestRow {
+  id: number
+  teacherId: number
+  teacherNo?: string
+  teacherName?: string
+  oldUsername?: string
+  oldName?: string
+  oldDepartment?: string
+  oldTitle?: string
+  newUsername?: string
+  newName?: string
+  newDepartment?: string
+  newTitle?: string
+  /** 是否申请了重置密码；后端只给标记，永不返回哈希 */
+  passwordChange?: boolean
+  reason?: string
+  status: AppealStatus
+  reviewNote?: string
+  reviewerUsername?: string
+  reviewedAt?: string
+  createdAt: string
+}
+
 export interface ScopeRow {
   id: number
   teacherId: number

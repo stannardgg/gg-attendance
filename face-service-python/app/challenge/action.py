@@ -1,5 +1,24 @@
 """动作判定：固定 ROI + 亮度统计 + 连续段计数；尺度类动作用检测框尺寸。
 
+四类判据，全部避开 `2d106det` 的形状归一化：
+
+  | 动作族 | 信号 | 来源 |
+  |---|---|---|
+  | 张嘴（回滚用） | 嘴区暗像素占比 | 192 对齐空间里的固定 ROI |
+  | 靠近 / 离远 | 检测框几何平均尺度 / 画面宽 | SCRFD bbox，原图坐标 |
+  | 闭眼 | 眼框暗像素占比 | 192 对齐空间里的固定眼框 |
+  | 左转 / 右转 | 鼻尖相对双眼中点的横向偏移 / 瞳距 | SCRFD **5 点**，原图坐标 |
+
+最后一行是 CR-021 的新增项，也是唯一用到关键点的判据。它与 v2.0 禁用的
+「关键点角度」不是一回事：禁的是 `2d106det` 那个带强形状先验的回归器
+（偏 20° 只变 0.03~0.05，信号被归一化吃掉）；SCRFD 的 5 点检测头直接回归
+原图坐标，保留了姿态。实测（`probe_action.py --pose`）：静止抖动
+std=0.0104，整帧滚转 ±15/±30° 的漂移 mean|Δ|=0.030 / max=0.108，阈值 0.12
+对前者是 11.5σ、对后者刚好留出余量。
+
+眼框也是关键点，但只用来**定位**：眼框取自 106 点的眼球轮廓（33~42 / 87~96），
+判定仍用框内暗度统计——这与「关键点只用于定位 ROI」的全局约束一致。
+
 实现的是项目文档 §4.4.2 的核心设计，三条铁律在这里固化：
 
 1. **关键点只用于定位 ROI，判动作用 ROI 内的亮度统计**。
@@ -24,13 +43,16 @@ from __future__ import annotations
 import numpy as np
 
 
-def mouth_dark_ratio(gray_roi: np.ndarray) -> float:
-    """嘴区暗像素占比（0~1）。
+def dark_ratio(gray_roi: np.ndarray) -> float:
+    """ROI 内暗像素占比（0~1）。嘴、眼、任意小区域通用。
 
     阈值取 ROI 中位数的 0.82 倍并下移 8 个灰度级，自适应不同光照与肤色：
       - 固定灰度阈值（如 <80）在暗光教室会把整张脸都算"暗"；
       - 固定比例阈值在逆光下又会把背景算进去。
     中位数自适应 + 绝对下移，两者结合才稳。
+
+    ⚠️ 整块 ROI 亮度均匀（例如被黑条遮挡）时中位数会塌到 0，阈值变成负数，
+    统计结果反而归 0——这不是"没有暗像素"，是判据失效。质检/打码素材上不要用它。
     """
     if gray_roi.size == 0:
         return 0.0
@@ -40,6 +62,52 @@ def mouth_dark_ratio(gray_roi: np.ndarray) -> float:
         # 极亮画面（如过曝）时阈值可能为负，此时用绝对下限兜底
         thresh = med * 0.7
     return float((gray_roi < thresh).sum() / gray_roi.size)
+
+
+# 兼容旧名：v1.x 只有嘴部动作时用的就是这个名字，外部脚本与测试还在引用。
+mouth_dark_ratio = dark_ratio
+
+
+def interocular(face) -> float:
+    """瞳距（原图像素）。眼框尺寸、偏航代理都以它为尺度基准。"""
+    if face is None:
+        return 0.0
+    kps = np.asarray(face.kps, dtype=np.float64).reshape(5, 2)
+    return float(np.linalg.norm(kps[1] - kps[0]))
+
+
+def yaw_proxy(face) -> float:
+    """偏航代理：鼻尖相对双眼中点、沿**眼轴方向**的偏移，除以瞳距。
+
+    为什么沿眼轴投影而不是直接取 x 差：歪头（滚转）会把 x 差整体带偏。
+    沿「左眼 → 右眼」的单位向量投影后，滚转在数学上被消掉；实测残余来自
+    检测器自身在侧倾下的关键点偏差（整帧 ±30° 漂移 mean 0.029 / max 0.11）。
+
+    符号：`kps[0]` 是图像左侧的眼睛（实测 60/60 身份成立），代理 > 0 表示鼻尖
+    偏向画面右侧 —— 对着镜头的人把头转向**他自己的左边**时就是这样。
+    因此 TURN_LEFT 对应代理增大。注意这依赖"上传帧未镜像"：前端只在
+    `<video>` 上做 CSS 镜像，`drawImage` 取的是原始流（useCamera.captureSmall）。
+    """
+    if face is None:
+        return 0.0
+    kps = np.asarray(face.kps, dtype=np.float64).reshape(5, 2)
+    le, re, nose = kps[0], kps[1], kps[2]
+    v = re - le
+    iod = float(np.linalg.norm(v))
+    if iod <= 1e-6:
+        return 0.0
+    return float(np.dot(nose - (le + re) / 2.0, v / iod) / iod)
+
+
+def eye_dark_ratio(gray: np.ndarray, rois: list[int]) -> float:
+    """两只眼框的暗像素占比均值。`rois` 是扁平的 8 个整数（192 空间两组矩形）。"""
+    vals = []
+    for i in range(0, len(rois) - 3, 4):
+        x1, y1, x2, y2 = rois[i:i + 4]
+        patch = gray[y1:y2, x1:x2]
+        if patch.size:
+            vals.append(dark_ratio(patch))
+    return float(np.mean(vals)) if vals else 0.0
 
 
 class MouthActionCounter:
@@ -205,3 +273,143 @@ class ScaleActionCounter:
     def observed_range(self) -> tuple[float, float]:
         """(最小, 最大) 尺度比，用于日志与申诉归因。"""
         return self._min_ratio, self._max_ratio
+
+
+class EyeCloseCounter:
+    """按连续段统计「闭眼」次数（CR-021）。
+
+    判据与张嘴同构，方向相反：眼睑盖住虹膜 → 眼框里的暗像素**减少**。
+
+      base_ratio  基线眼框暗度（指令渲染之前的中性帧）
+      abs_drop    相对基线的绝对降幅（0.06 = 6% 的像素由暗转亮）
+      drop_ratio  同时要求降到基线的 0.60 倍以下，两个条件 AND
+
+    为什么是这两个阈值：80 个身份「肤色覆盖眼睑 + 保留睫毛线」实测，
+    睁眼 0.257 → 闭眼 0.053，逐人降幅 0.204 ± 0.055，最小 0.043；
+    静止抖动（±4px / 亮度 ±5% / JPEG q60）std=0.0096，0.06 相当于 6σ。
+    两个降幅不足 0.06 的个例，基线本身只有 0.093 / 0.098 —— 由
+    `eye_base_min=0.10` 的可做性门槛挡在抽签之外（不是判失败）。
+
+    为什么不用关键点开合比：整只眼睛被肤色覆盖时开合比只跌 19%（v2.0 实测），
+    而同一实验里暗度从 0.018 涨到 0.309。梯度能量也试过，相对降幅仅 4.8%，
+    且 20% 的身份是反号——已否决。
+    """
+
+    def __init__(self, base_ratio: float, abs_drop: float = 0.06,
+                 drop_ratio: float = 0.60, hold_frames: int = 2):
+        self.base = max(base_ratio, 1e-4)
+        self.abs_drop = abs_drop
+        self.drop_ratio = drop_ratio
+        self.hold_frames = max(1, hold_frames)
+        self._run: list[float] = []
+        self._in_close = False
+        self._count = 0
+        self._segments: list[tuple[int, int]] = []
+        self._seg_start = 0
+        self._seq = 0
+        self._max_ratio = base_ratio
+        self._ratios: list[float] = []
+        self._rescored = False
+
+    def observe(self, ratio: float) -> None:
+        """喂入一帧的眼框暗度。顺序敏感，乱序帧不应调用。"""
+        self._ratios.append(ratio)
+        self._max_ratio = max(self._max_ratio, ratio)
+        active = (ratio <= self.base - self.abs_drop) and (ratio <= self.base * self.drop_ratio)
+        if active:
+            if not self._in_close:
+                self._in_close = True
+                self._seg_start = self._seq
+            self._run.append(ratio)
+        else:
+            if self._in_close:
+                if len(self._run) >= self.hold_frames:
+                    self._count += 1
+                    self._segments.append((self._seg_start, self._seq - 1))
+                self._in_close = False
+                self._run = []
+        self._seq += 1
+
+    def result(self) -> tuple[int, list[tuple[int, int]]]:
+        """返回 (次数, 段列表)。结尾仍在闭眼中按已积累长度判定。
+
+        ★ 基线自愈（与张嘴同构，方向相反）：基线帧若正好拍在"已经闭眼"上，
+        基线被压到闭眼水平，之后任何闭眼都跌不破它，次数恒为 0。判据是
+        序列里出现过明显**更亮**（睁眼）的帧——那就用观测到的最高值重算。
+        正常场景 max ≈ baseline，不触发，行为不变。
+        """
+        if not self._rescored and self._max_ratio > self.base * 1.6:
+            self._rescored = True
+            healed = EyeCloseCounter(self._max_ratio, self.abs_drop,
+                                     self.drop_ratio, self.hold_frames)
+            healed._rescored = True
+            for r in self._ratios:
+                healed.observe(r)
+            return healed.result()
+        if self._in_close and len(self._run) >= self.hold_frames:
+            return self._count + 1, self._segments + [(self._seg_start, self._seq - 1)]
+        return self._count, list(self._segments)
+
+    @property
+    def observed_max(self) -> float:
+        return self._max_ratio
+
+
+class TurnActionCounter:
+    """按连续段统计「朝指定方向转头」的次数（CR-021）。
+
+    与 ScaleActionCounter 同构，把「尺度离基线多远」换成「偏航代理离基线多远」：
+
+      base_yaw   基线帧的偏航代理
+      direction  +1 = 向左（代理增大）；-1 = 向右（代理减小）
+      delta      相对基线的变化量（0.12 IOD，约 20°）
+      hold_frames 一次动作至少连续几帧（2 帧 @4fps = 0.5s）
+
+    方向必须相对基线判定：用「序列最大/最小值」的话，「先左后右」会同时满足
+    两个方向，指令就退化成「随便动一下头」。
+    """
+
+    def __init__(self, base_yaw: float, direction: int, delta: float = 0.12,
+                 hold_frames: int = 2):
+        self.base = float(base_yaw)
+        self.direction = 1 if direction >= 0 else -1
+        self.delta = float(delta)
+        self.hold_frames = max(1, hold_frames)
+        self._run: list[float] = []
+        self._in_action = False
+        self._count = 0
+        self._segments: list[tuple[int, int]] = []
+        self._seg_start = 0
+        self._seq = 0
+        self._min_delta = 0.0
+        self._max_delta = 0.0
+
+    def observe(self, yaw: float) -> None:
+        """喂入一帧的偏航代理。顺序敏感，乱序帧不应调用。"""
+        d = (float(yaw) - self.base) * self.direction
+        self._min_delta = min(self._min_delta, d)
+        self._max_delta = max(self._max_delta, d)
+        active = d >= self.delta
+        if active:
+            if not self._in_action:
+                self._in_action = True
+                self._seg_start = self._seq
+            self._run.append(yaw)
+        else:
+            if self._in_action:
+                if len(self._run) >= self.hold_frames:
+                    self._count += 1
+                    self._segments.append((self._seg_start, self._seq - 1))
+                self._in_action = False
+                self._run = []
+        self._seq += 1
+
+    def result(self) -> tuple[int, list[tuple[int, int]]]:
+        if self._in_action and len(self._run) >= self.hold_frames:
+            return self._count + 1, self._segments + [(self._seg_start, self._seq - 1)]
+        return self._count, list(self._segments)
+
+    @property
+    def observed_delta(self) -> tuple[float, float]:
+        """(最小, 最大) 带方向的偏移量，用于日志与申诉归因。"""
+        return self._min_delta, self._max_delta
