@@ -153,7 +153,7 @@ def test_06_画面两人(world):
                               baseline=face_a, until_error=True)
     assert res.get("code") == "FA-4002", res
     assert "只能留下一个人" in res["message"]
-    assert flows.attendance_of(st["client"], s["id"]).status == 404
+    flows.assert_no_attendance(st["client"], s["id"])
 
 
 def test_08_要求靠近但没动(world):
@@ -399,7 +399,7 @@ def test_07_照片翻拍被拒(world):
     assert res.get("passed") is False, res
     assert res["rejectGate"], res          # 误拒必须可归因（§6.5），写清是哪道门禁拦的
     assert res["similarity"] is not None
-    assert flows.attendance_of(world.students["s1"]["client"], s["id"]).status == 404
+    flows.assert_no_attendance(world.students["s1"]["client"], s["id"])
 
 
 # ---------------------------------------------------------------- CR-021 新增场景

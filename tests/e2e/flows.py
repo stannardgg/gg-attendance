@@ -99,6 +99,20 @@ def attendance_of(student: Client, sid: int):
     return student.get(f"/api/v1/mobile/attendance/{sid}")
 
 
+def assert_no_attendance(student: Client, sid: int) -> None:
+    """断言"这场签到没有该学生的考勤记录"。
+
+    ★ CR-015 起这里**不是 404**：签到失败要能从这个页面发起申诉，前端拿到 404
+    就没法渲染入口。所以「无记录」表达为 200 + `status=null` + `canAppeal=true`。
+    2026-11-22 发现场景 06/07 还停在 404 上（只在阶段 B 跑，一直没被翻出来）。
+    """
+    r = attendance_of(student, sid)
+    assert r.status == 200, f"无记录不该是 {r.status}：{r.body}"
+    data = r.data
+    assert data["status"] is None, data
+    assert data["canAppeal"] is True, data
+
+
 # ---------------- 人脸挑战 ----------------
 def _frame_bytes(face_base: Client, cid: str, frame, seq: int, token: str):
     return face_base.request(
