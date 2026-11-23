@@ -167,7 +167,7 @@ const gateRows = computed(() => {
           本次签到的申诉入口未开启。请联系任课老师说明情况。
         </p>
         <p v-if="!canRetry && canAppeal" class="muted" style="margin-top: 10px">
-          识别失败次数已达上限，本场不能再刷脸。请提交申诉，由老师人工核对。
+          超过三次识别失败，联系管理员。本场不能再刷脸，可提交申诉由老师人工核对。
         </p>
       </div>
     </template>

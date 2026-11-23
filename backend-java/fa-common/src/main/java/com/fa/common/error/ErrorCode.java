@@ -36,7 +36,7 @@ public enum ErrorCode {
     QR_INVALID("FA-3002", HttpStatus.BAD_REQUEST, "二维码已失效，请重新扫码"),
     ALREADY_CHECKED_IN("FA-3003", HttpStatus.CONFLICT, "你已完成签到，无需重复"),
     NOT_IN_CLASS("FA-3004", HttpStatus.FORBIDDEN, "你不在本次签到的班级中"),
-    RETRY_EXCEEDED("FA-3005", HttpStatus.TOO_MANY_REQUESTS, "重试次数过多，请稍后再试或提交申诉"),
+    RETRY_EXCEEDED("FA-3005", HttpStatus.TOO_MANY_REQUESTS, "超过三次识别失败，联系管理员"),
 
     // ---- 4xxx 人脸 ----
     NO_FACE("FA-4001", HttpStatus.BAD_REQUEST, "未检测到人脸"),

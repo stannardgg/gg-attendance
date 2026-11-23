@@ -194,7 +194,9 @@ public class MobileCheckinController {
         // 都不能绕过「三次失败后本场锁死」。查库一行，代价可忽略。
         CheckinDtos.AttemptData attempt = attempts.status(sid, user.studentId());
         if (attempt.blocked()) {
-            throw new BizException(ErrorCode.RETRY_EXCEEDED, "识别失败次数已达上限，请提交申诉让老师核对");
+            // 文案统一走 ErrorCode 枚举（业主验收口径「超过三次识别失败，联系管理员」），
+            // join/start/active 三个入口显示同一句
+            throw new BizException(ErrorCode.RETRY_EXCEEDED);
         }
         Long faceActive = jdbc.queryForObject(
                 "select count(*) from face_profile where student_id = ? and status = 'ACTIVE'",

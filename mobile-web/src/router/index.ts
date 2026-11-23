@@ -1,6 +1,6 @@
 import { createRouter, createWebHistory, type RouteRecordRaw } from 'vue-router'
 import { auth, loadMe, logout } from '@/shared/store/auth'
-import { getToken } from '@/shared/api/client'
+import { getRefreshToken, getToken } from '@/shared/api/client'
 
 const routes: RouteRecordRaw[] = [
   { path: '/login', name: 'login', component: () => import('@/features/auth/LoginView.vue'), meta: { public: true } },
@@ -37,7 +37,9 @@ const router = createRouter({ history: createWebHistory('/m/'), routes })
 
 router.beforeEach(async (to) => {
   if (to.meta.public) return true
-  if (!getToken()) {
+  // 只有 access 也可能只是过期了：只要 refresh cookie 还在就先放行，
+  // loadMe 里会静默续期——直接踢登录页会打断「刷新后仍是当前用户」。
+  if (!getToken() && !getRefreshToken()) {
     return { name: 'login', query: { redirect: to.fullPath } }
   }
   if (!auth.ready) await loadMe()

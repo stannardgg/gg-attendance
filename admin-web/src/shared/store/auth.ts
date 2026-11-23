@@ -3,7 +3,16 @@
  * 一个 reactive 对象比"再学一个状态库"更省事，也更容易在路由守卫里同步读取。
  */
 import { computed, reactive } from 'vue'
-import { api, getToken, setToken, ApiError } from '@/shared/api/client'
+import {
+  api,
+  ApiError,
+  clearTokens,
+  getRefreshToken,
+  getToken,
+  refreshAccessToken,
+  setRefreshToken,
+  setToken
+} from '@/shared/api/client'
 import type { LoginResult, Me } from '@/shared/api/types'
 
 interface AuthState {
@@ -29,12 +38,14 @@ export function can(permission: string): boolean {
 
 export async function login(username: string, password: string): Promise<void> {
   const data = await api.post<LoginResult>('/api/v1/auth/login', { username, password })
-  setToken(data.accessToken)
+  // 双令牌都落 cookie：access 短命（秒级 TTL 用服务端返回值），refresh 7 天
+  setToken(data.accessToken, data.expiresIn)
+  setRefreshToken(data.refreshToken)
   await loadMe()
 }
 
 export async function loadMe(): Promise<void> {
-  if (!getToken()) {
+  if (!getToken() && !getRefreshToken()) {
     // 令牌已不存在（本页登出，或别的标签页登出）：身份必须一起清掉，
     // 否则菜单还按旧身份渲染，点进去只会收到 401
     auth.profile = null
@@ -43,6 +54,19 @@ export async function loadMe(): Promise<void> {
     auth.ready = true
     return
   }
+  if (!getToken()) {
+    // 只剩 refresh cookie（隔天打开页面、access 已到期）：先静默换新再取身份，
+    // 刷新页面不该看到登录页——这是「刷新后仍然是当前用户」的验收口径。
+    const fresh = await refreshAccessToken()
+    if (!fresh) {
+      clearTokens()
+      auth.profile = null
+      auth.permissions = []
+      auth.scope = { classIds: [], courseIds: [] }
+      auth.ready = true
+      return
+    }
+  }
   try {
     const me = await api.get<Me>('/api/v1/auth/me')
     auth.profile = me.profile
@@ -50,7 +74,7 @@ export async function loadMe(): Promise<void> {
     auth.scope = me.scope ?? { classIds: [], courseIds: [] }
   } catch (err) {
     // 令牌失效时不要静默：清掉并让守卫把用户送回登录页
-    if (err instanceof ApiError && err.code === 'FA-1002') setToken(null)
+    if (err instanceof ApiError && err.code === 'FA-1002') clearTokens()
     auth.profile = null
   } finally {
     auth.ready = true
@@ -63,7 +87,7 @@ export async function logout(): Promise<void> {
   } catch {
     // 登出失败也要清本地状态：否则用户会卡在"看起来已登录但其实没有令牌"的状态
   }
-  setToken(null)
+  clearTokens()
   auth.profile = null
   auth.permissions = []
 }

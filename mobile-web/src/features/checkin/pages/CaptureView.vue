@@ -19,7 +19,7 @@ import { useFrameUploader } from '../composables/useFrameUploader'
 import ActionPrompt from '../components/ActionPrompt.vue'
 import FaceGuideOverlay from '../components/FaceGuideOverlay.vue'
 import ResultPanel from '../components/ResultPanel.vue'
-import { checkin, clearJoin, restoreJoin } from '../store'
+import { checkin, clearJoin, peekJoinSid, restoreJoin } from '../store'
 import { auth } from '@/shared/store/auth'
 import { deviceHash, isSecureContextOk, isWeChat } from '@/shared/utils'
 import WeChatGuard from '@/shared/components/WeChatGuard.vue'
@@ -251,8 +251,17 @@ onMounted(async () => {
   // 关掉，这里是硬拦：不进任何摄像头流程，只给复制链接。
   if (isWeChat()) return
   if (!restoreJoin()) {
-    showToast('签到信息已过期，请重新进入')
-    router.replace('/checkin')
+    // 票据 60s 过期不等于场次信息丢失：带 sid 回入口页重新 join——
+    // 未达上限就续票进采集，已锁死（FA-3005）会在入口页直接给出
+    // 「超过三次识别失败，联系管理员」与申诉入口。刷新多少次结果一致：
+    // 权威计数在 checkin_attempt 表，不随前端状态重置。
+    const sid = peekJoinSid()
+    if (sid) {
+      router.replace(`/checkin?sid=${sid}`)
+    } else {
+      showToast('签到信息已过期，请重新进入')
+      router.replace('/checkin')
+    }
     return
   }
   if (!isSecureContextOk()) {
