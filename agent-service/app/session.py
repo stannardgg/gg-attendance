@@ -31,8 +31,15 @@ class AgentSession:
             "recursion_limit": settings.recursion_limit,
         }
 
-    def ask(self, query: str, forced: dict[str, Any] | None = None) -> dict[str, Any]:
-        state = new_state(query, self.token, self.user, forced)
+    def ask(self, query: str, forced: dict[str, Any] | None = None,
+            history: list[dict[str, str]] | None = None) -> dict[str, Any]:
+        """发起新一轮提问。
+
+        `history` 是此前轮次的对话（[{role, content}]），由调用方从自己的
+        消息记录里注入——图的其余状态每轮都会重置，唯独这份记忆让模型能
+        理解「确认」「就查它」这类对上一轮的指代。裁剪在 common.llm_history_messages。
+        """
+        state = new_state(query, self.token, self.user, forced, history)
         state["conversation_id"] = self.thread_id.split(":")[-1]
         return self._run(state)
 

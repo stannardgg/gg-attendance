@@ -15,6 +15,9 @@ class AgentState(TypedDict, total=False):
     token: str
     user: dict[str, Any]
     conversation_id: str
+    # 跨轮对话记忆：此前的用户/助手消息（role/content），由调用方每轮注入。
+    # 检查点里的旧值每轮都会被新输入覆盖，不存在越用越长的堆积问题。
+    history: list[dict[str, str]]
 
     # 会话内上下文
     intent: str             # chitchat | query | draft | action | blocked
@@ -44,11 +47,13 @@ class AgentState(TypedDict, total=False):
 
 
 def new_state(query: str, token: str, user: dict[str, Any],
-              forced: dict[str, Any] | None = None) -> AgentState:
+              forced: dict[str, Any] | None = None,
+              history: list[dict[str, str]] | None = None) -> AgentState:
     return AgentState(
         query=query,
         token=token,
         user=user,
+        history=list(history or []),
         intent="",
         blocked_reason="",
         forced=forced,
