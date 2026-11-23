@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from app.config import settings
-from app.graph.common import fmt_date, monday_of_this_week, today
+from app.graph.common import fmt_date, llm_history_messages, monday_of_this_week, today
 from app.graph.state import AgentState
 from app.llm.client import LlmUnavailable, chat
 from app.llm.prompts import SYSTEM_PROMPT
@@ -485,8 +485,17 @@ def _llm_plan(state: AgentState, text: str, steps: int) -> dict:
                                       f"（都按 Asia/Shanghai）。用户说「今天/昨天/本周」时直接换算成日期参数。"},
         {"role": "system", "content": "可用工具（只能从中选，不要编造）: "
                                       + ", ".join(t["function"]["name"] for t in tools)},
-        {"role": "user", "content": text},
     ]
+    # 跨轮记忆：没有它，「确认」「就查它」这类指代在模型眼里是无上下文的孤句，
+    # 只能回"没有待确认的操作记录"。历史只作理解用，工具调用仍以本轮为准。
+    history = llm_history_messages(state.get("history"))
+    if history:
+        messages.append({"role": "system", "content":
+            "以下是本轮之前的对话记录（旧→新，单条可能被截断）。用户当前这句话可能是"
+            "对上一轮的确认、补充或追问，请结合它理解；若上一轮你在等用户补参数或等确认，"
+            "现在信息齐了就立即调用对应工具取预览，不要再重复追问。"})
+        messages.extend(history)
+    messages.append({"role": "user", "content": text})
     if done:
         messages.append({"role": "system", "content": "已经调用过：" + "；".join(done)})
     reply = chat(messages, tools)

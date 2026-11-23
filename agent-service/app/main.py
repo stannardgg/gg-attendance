@@ -118,9 +118,14 @@ def main() -> None:
         prompt = st.session_state.pop("auto_prompt", None)
 
     if prompt:
+        # 跨轮记忆：把当前这句**之前**的消息注入本轮（user/assistant 即可）。
+        # 必须在 append 当前消息之前取，否则「确认」会把自己也当成历史。
+        prior = [{"role": m["role"], "content": m["content"]}
+                 for m in messages if m.get("role") in ("user", "assistant") and m.get("content")]
         messages.append({"role": "user", "content": prompt})
         with st.spinner("查询中…"):
-            result = session.ask(prompt, forced=st.session_state.pop("quick_forced", None))
+            result = session.ask(prompt, forced=st.session_state.pop("quick_forced", None),
+                                 history=prior)
         _append_result(messages, result)
         _history.save(account_id, conv, messages)
         st.rerun()
