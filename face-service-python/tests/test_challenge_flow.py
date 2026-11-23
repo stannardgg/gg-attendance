@@ -186,7 +186,9 @@ def test_move_closer_passes_action_gate(service, face_img, monkeypatch):
     monkeypatch.setattr(settings.action, "allow_action_hint", True)
 
     base = composite(face_img)
-    near = composite(face_img, side=380)          # 放大 ~19%
+    # det 320 后检测框略紧（380/320 实测 ratio=1.178，贴着 0.18 阈值过不去）。
+    # 素材放大 25% 留 6% 余量，测试意图不变：足够大的正向变化必须达标。
+    near = composite(face_img, side=400)          # 放大 ~25%
     info = service.start(tickets.issue(1, 120, "jti-closer"), base,
                          action_hint="MOVE_CLOSER")
     assert info["action"] == "MOVE_CLOSER"
@@ -381,8 +383,8 @@ def test_eye_pose_gate_excludes_displaced_frames():
     「移动」不是「闭眼」。偏航超界的帧不计入判据，全部超界判未完成。"""
     from app.challenge import gates
     st = _state("EYE_CLOSE", baseline_eye=0.25, baseline_yaw=0.0, baseline_roll=0.0,
-                eyes=[0.25, 0.05, 0.05],
-                eye_yaws=[0.0, 0.30, 0.30], eye_rolls=[0.0, 0.0, 0.0])
+                eyes=[0.25, 0.05, 0.05, 0.05],
+                eye_yaws=[0.0, 0.30, 0.30, 0.30], eye_rolls=[0.0, 0.0, 0.0, 0.0])
     g, detected, _ = gates.gate_action(st)
     assert detected == 0 and not g.passed
 
@@ -391,28 +393,118 @@ def test_eye_pose_gate_excludes_rolled_frames():
     """滚转同理：歪头也会把眼框搬离 ROI。"""
     from app.challenge import gates
     st = _state("EYE_CLOSE", baseline_eye=0.25, baseline_yaw=0.0, baseline_roll=0.0,
-                eyes=[0.25, 0.05, 0.05],
-                eye_yaws=[0.0, 0.02, 0.02], eye_rolls=[0.0, 0.40, 0.40])
+                eyes=[0.25, 0.05, 0.05, 0.05],
+                eye_yaws=[0.0, 0.02, 0.02, 0.02], eye_rolls=[0.0, 0.40, 0.40, 0.40])
     g, detected, _ = gates.gate_action(st)
     assert detected == 0 and not g.passed
 
 
 def test_eye_pose_gate_keeps_still_frames():
-    """正常闭眼（头部不动）不受闸门影响。"""
+    """正常闭眼（头部不动）不受闸门影响；hold=2 下连续 2 帧达标计 1 次。"""
     from app.challenge import gates
     st = _state("EYE_CLOSE", baseline_eye=0.25, baseline_yaw=0.0, baseline_roll=0.0,
-                eyes=[0.25, 0.05, 0.05],
-                eye_yaws=[0.0, 0.02, 0.02], eye_rolls=[0.0, 0.05, 0.05])
+                eyes=[0.25, 0.05, 0.05, 0.05],
+                eye_yaws=[0.0, 0.02, 0.02, 0.02], eye_rolls=[0.0, 0.05, 0.05, 0.05])
     g, detected, _ = gates.gate_action(st)
     assert detected == 1 and g.passed
+
+
+def test_eye_hold2_needs_two_consecutive_frames():
+    """hold=2 恢复后的门禁语义：单帧达标不再计数（挡单帧噪声）。"""
+    from app.challenge import gates
+    st = _state("EYE_CLOSE", baseline_eye=0.25, eyes=[0.25, 0.05, 0.25, 0.26])
+    g, detected, _ = gates.gate_action(st)
+    assert detected == 0 and not g.passed
 
 
 def test_eye_gate_legacy_state_without_pose_still_counts():
     """部署前开的存量 challenge 没有逐帧姿态：闸门跳过，保持原判据。"""
     from app.challenge import gates
-    st = _state("EYE_CLOSE", baseline_eye=0.25, eyes=[0.25, 0.05, 0.05])
+    st = _state("EYE_CLOSE", baseline_eye=0.25, eyes=[0.25, 0.05, 0.05, 0.05])
     g, detected, _ = gates.gate_action(st)
     assert detected == 1 and g.passed
+
+
+# ---------------- 被动活体线索（默认关，只否决） ----------------
+
+def test_passive_gate_disabled_by_default():
+    """PASSIVE_GATE=0（默认）：不否决、value/threshold 为 null，链路稳定。"""
+    from app.challenge import gates
+    st = _state("MOVE_CLOSER", baseline_scale=0.3,
+                passive_peak=[99.0], passive_hf=[0.99], passive_clip=[0.99])
+    g = gates.gate_passive(st)
+    assert g.passed and g.value is None and g.threshold is None
+
+
+def test_passive_gate_veto_needs_corroboration():
+    """周期性证据 + 独立旁证才否决：单峰不否决（防误拒）。"""
+    from app.challenge import gates
+    from app.config import settings
+    st = _state("MOVE_CLOSER", baseline_scale=0.3,
+                passive_peak=[99.0, 99.0], passive_hf=[0.1, 0.1],
+                passive_clip=[0.01, 0.01])
+    # 阈值是占位值，直接改小以触发判定路径
+    old = (settings.gates.passive_gate_enabled, settings.gates.passive_peak_max,
+           settings.gates.passive_hf_max, settings.gates.passive_clip_max)
+    settings.gates.passive_gate_enabled = True
+    settings.gates.passive_peak_max = 50.0
+    settings.gates.passive_hf_max = 0.60
+    settings.gates.passive_clip_max = 0.30
+    try:
+        solo = gates.gate_passive(st)
+        assert solo.passed, "只有周期性证据、无旁证，不许否决"
+        st2 = _state("MOVE_CLOSER", baseline_scale=0.3,
+                     passive_peak=[99.0, 99.0], passive_hf=[0.9, 0.9],
+                     passive_clip=[0.01, 0.01])
+        vetoed = gates.gate_passive(st2)
+        assert not vetoed.passed, "周期性 + 高频旁证 → 否决"
+    finally:
+        (settings.gates.passive_gate_enabled, settings.gates.passive_peak_max,
+         settings.gates.passive_hf_max, settings.gates.passive_clip_max) = old
+
+
+def test_passive_veto_blocks_finish():
+    """被动否决进 AND 链：其余门禁全过也不放行，rejectGate=passive。"""
+    from app.challenge import gates
+    st = _state("MOVE_CLOSER", baseline_scale=0.30,
+                scales=[0.30, 0.36, 0.37, 0.36, 0.30, 0.31],
+                passive_peak=[99.0, 99.0, 99.0], passive_hf=[0.9, 0.9, 0.9],
+                passive_clip=[0.5, 0.5, 0.5])
+    from app.config import settings
+    old = (settings.gates.passive_gate_enabled, settings.gates.passive_peak_max,
+           settings.gates.passive_hf_max, settings.gates.passive_clip_max)
+    settings.gates.passive_gate_enabled = True
+    settings.gates.passive_peak_max = 50.0
+    settings.gates.passive_hf_max = 0.60
+    settings.gates.passive_clip_max = 0.30
+    try:
+        a_g, detected, _ = gates.gate_action(st)
+        p_g = gates.gate_passive(st)
+        assert detected >= 1 and a_g.passed, "动作门禁本身应通过"
+        assert not p_g.passed, "被动门禁否决"
+    finally:
+        (settings.gates.passive_gate_enabled, settings.gates.passive_peak_max,
+         settings.gates.passive_hf_max, settings.gates.passive_clip_max) = old
+
+
+def test_identity_gate_survives_skipped_embeddings(service, face_img, monkeypatch):
+    """隔帧 ArcFace 后「中途换人」仍被抓到：换人帧落在偶数序号即可检出。"""
+    from app.config import settings
+    import cv2 as _cv2
+    import os as _os
+    monkeypatch.setattr(settings.action, "allow_action_hint", True)
+    other_path = _os.path.join(CASIA, "001", "001_0.jpg")
+    other = _cv2.imread(other_path)
+    assert other is not None, "需要第二个身份的素材"
+    a = composite(face_img)
+    b = composite(other)
+    info = service.start(tickets.issue(1, 140, "jti-swap"), a, action_hint="MOVE_CLOSER")
+    cid = info["challengeId"]
+    # seq0=A（嵌入），seq1=A（跳过），seq2..=B（偶数序号全部嵌入）
+    for seq, frame in ((0, a), (1, a), (2, b), (3, b), (4, b), (5, b)):
+        service.frame(cid, frame, seq=seq)
+    result = service.finish(cid)
+    assert result["gates"]["identity"]["passed"] is False
 
 
 def test_eye_close_not_eligible_without_headroom(face_img):

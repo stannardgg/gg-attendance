@@ -49,11 +49,61 @@ def gate_identity(st: ChallengeState) -> GateResult:
 
     为什么用首末而不是每帧两两比：换人发生在序列中间，
     末帧不是开头那个人——首末对比就能发现，而且只要 1 次比对。
+    （隔帧 ArcFace 后 last_emb 最多滞后一帧 ~300ms，检测粒度 0.3s→0.6s。）
     """
     if not st.first_emb or not st.last_emb:
         return GateResult(False, None, settings.gates.identity_sim)
     sim = cosine_similarity(np.array(st.first_emb), np.array(st.last_emb))
     return GateResult(sim >= settings.gates.identity_sim, sim, settings.gates.identity_sim)
+
+
+def gate_passive(st: ChallengeState) -> GateResult:
+    """门禁4（被动活体，2026-11-22 接线，默认关）：屏幕重放物理痕迹。
+
+    只否决不放行：真实人脸不触发，开启与否不影响误拒率基线。
+    否决规则 = 非轴向孤立峰显著性达标 AND（高频占比达标 OR 过曝白斑达标）
+    ——周期性证据必须有独立旁证，单证据不否决。样本取末 N 帧的中位数
+    （与活体门禁同款聚合，抗离群帧）。
+
+    **阈值是占位值**：三轮合成标定全部零区分度（见 passive.py 标定状态），
+    PASSIVE_GATE=1 开启前必须用真机采集重标（≥10 场真实摄像头 bona fide 定
+    上限、≥10 场真机屏幕重放定下限，阈值取几何中点）。门禁关闭时返回
+    passed=True、value=None，finish 链路稳定，开启只是配置变化。
+    """
+    if not settings.gates.passive_gate_enabled or not st.passive_peak:
+        return GateResult(True, None, None)
+    n = max(1, settings.gates.passive_samples)
+    prom = float(np.median(st.passive_peak[-n:]))
+    hf = float(np.median(st.passive_hf[-n:])) if st.passive_hf else 0.0
+    clip = float(np.median(st.passive_clip[-n:])) if st.passive_clip else 0.0
+    periodic = prom >= settings.gates.passive_peak_max
+    corroborated = (hf >= settings.gates.passive_hf_max
+                    or clip >= settings.gates.passive_clip_max)
+    passed = not (periodic and corroborated)
+    if not passed:
+        logger.warning("passive veto cid=%s prom=%.2f hf=%.3f clip=%.3f（疑似屏幕重放）",
+                       st.challenge_id, prom, hf, clip)
+    return GateResult(passed, prom, settings.gates.passive_peak_max)
+
+
+def gate_disguise(st: ChallengeState) -> GateResult:
+    """门禁5（伪装/遮挡，CR-025，默认开）：遮挡帧占比。
+
+    frame 路径已把「连续 ≥3 帧遮挡」当场中止（FA-4009），finish 这道门禁
+    兜的是「断续遮挡」——口罩反复露脸又戴上、总遮挡帧超过一半的挑战，
+    即使动作凑够了也不放行。遮挡只在有脸帧上评估，分母用有脸帧数
+    （len(st.ratios)），无脸帧不参与。开关关闭或无遮挡记录时直接放行。
+    """
+    if not settings.disguise.enabled:
+        return GateResult(True, None, None)
+    frames = len(st.ratios)
+    if frames == 0:
+        # 无有脸帧按不足处理（与其他门禁「样本不足判不过」一致；实际上
+        # frames=0 会被 baseline_degraded 分支提前拦截，到不了这里）。
+        return GateResult(False, None, settings.disguise.occl_frame_max)
+    ratio = st.occl_total / frames
+    return GateResult(ratio <= settings.disguise.occl_frame_max,
+                      round(ratio, 4), settings.disguise.occl_frame_max)
 
 
 def gate_action(st: ChallengeState) -> tuple[GateResult, int, int]:

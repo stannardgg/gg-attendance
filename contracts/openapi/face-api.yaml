@@ -70,7 +70,7 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '409': { $ref: '#/components/responses/Conflict' }
         '429': { $ref: '#/components/responses/TooManyRequests' }
-      x-error-codes: [FA-3001, FA-3005, FA-4001, FA-4002, FA-4006]
+      x-error-codes: [FA-3001, FA-3005, FA-4001, FA-4002, FA-4006, FA-4009]
 
   /face-api/challenge/{id}/frame:
     post:
@@ -113,12 +113,12 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/FrameResp' }
         '400':
-          description: 中止类失败（多脸 / 连续无脸）
+          description: 中止类失败（多脸 / 连续无脸 / 连续遮挡 CR-025）
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ErrorResult' }
         '401': { $ref: '#/components/responses/Unauthorized' }
-      x-error-codes: [FA-4001, FA-4002]
+      x-error-codes: [FA-4001, FA-4002, FA-4009]
 
   /face-api/challenge/{id}/finish:
     post:
@@ -129,9 +129,11 @@ paths:
 
         | 门禁 | 阈值键 | 失败码 |
         |---|---|---|
+        | 伪装/遮挡占比（CR-025） | `DISGUISE_*` | `FA-4009`（rejectGate=disguise） |
         | 单帧活体，多帧取中位数 | `LIVENESS_THRESHOLD` | `FA-4004` |
         | 首末帧身份一致性 | `IDENTITY_SIM` | `FA-4007` |
         | 动作连续段次数 | `MOUTH_*` | `FA-4003` |
+        | 被动活体线索（默认关） | `PASSIVE_*` | rejectGate=passive |
 
         通过后由服务端调 Java `/internal/checkin/commit`，本接口返回最终考勤状态。
         `Redis SETNX` 保证同一 challenge 只提交一次；并发 finish 只有一次能拿到结果。
@@ -155,7 +157,7 @@ paths:
         '401': { $ref: '#/components/responses/Unauthorized' }
         '409': { $ref: '#/components/responses/Conflict' }
         '503': { $ref: '#/components/responses/ServiceUnavailable' }
-      x-error-codes: [FA-3003, FA-3005, FA-4003, FA-4004, FA-4005, FA-4007, FA-9002]
+      x-error-codes: [FA-3003, FA-3005, FA-4003, FA-4004, FA-4005, FA-4007, FA-4009, FA-9002]
 
   /face-api/enroll/sample:
     post:
@@ -251,7 +253,7 @@ components:
               properties:
                 rejectGate:
                   type: string
-                  enum: [liveness, identity, action_count, multi_face, no_face, match]
+                  enum: [liveness, identity, action_count, multi_face, no_face, disguise, match]
                 retryLeft: { type: integer }
                 hint: { type: string }
                 detectedCount: { type: integer }
@@ -378,7 +380,7 @@ components:
         rejectGate:
           type: string
           nullable: true
-          enum: [liveness, identity, action_count, multi_face, no_face, match]
+          enum: [liveness, identity, action_count, multi_face, no_face, passive, disguise, match]
         retryLeft:
           type: integer
           nullable: true
@@ -389,7 +391,7 @@ components:
         baselineDegraded: { type: boolean }
         gates:
           type: object
-          description: 三道门禁逐项结果，失败时用于定位是误拒还是真拒
+          description: 门禁逐项结果，失败时用于定位是误拒还是真拒
           properties:
             liveness: { $ref: '#/components/schemas/GateResult' }
             identity: { $ref: '#/components/schemas/GateResult' }
@@ -400,6 +402,12 @@ components:
                   properties:
                     detected: { type: integer }
                     required: { type: integer }
+            passive:
+              $ref: '#/components/schemas/GateResult'
+              description: 被动活体线索（2026-11-22 接线，默认关）。开启前 value/threshold 为 null
+            disguise:
+              $ref: '#/components/schemas/GateResult'
+              description: 伪装/遮挡（CR-025，默认开）。value=遮挡帧占比，threshold=0.50
 
     FinishResp:
       allOf:

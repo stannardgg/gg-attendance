@@ -6,6 +6,7 @@
   LookupError（挑战不存在/已过期）→ 400 FA-3002（语义「凭据失效请重来」）
   TooManyFaces            → 400 FA-4002
   NoFace                  → 400 FA-4001
+  DisguiseError           → 400 FA-4009（CR-025，消息带种类与摘除指令）
   ValueError（图像解析失败）→ 400 FA-9001（码不理想，见 handover「契约软点」）
 
 注意：判定未通过（finish 返回 rejectGate）不是错误，走 200——
@@ -26,7 +27,8 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from app import engine
-from app.challenge.service import ChallengeService, NoFace, RetryExceeded, TooManyFaces
+from app.challenge.service import (
+    ChallengeService, DisguiseError, NoFace, RetryExceeded, TooManyFaces)
 from app.challenge.store import ChallengeStore
 from app.config import settings
 from app.engine import ModelUnavailable
@@ -126,6 +128,12 @@ async def _multi_face(request: Request, exc: TooManyFaces):
 @app.exception_handler(NoFace)
 async def _no_face(request: Request, exc: NoFace):
     return _resp(request, "FA-4001", "未检测到人脸", None, 400)
+
+
+@app.exception_handler(DisguiseError)
+async def _disguised(request: Request, exc: DisguiseError):
+    # CR-025：消息带种类与摘除指令（start/frame 拼好传入），这里原样透传。
+    return _resp(request, "FA-4009", str(exc) or "检测到面部遮挡或伪装物", None, 400)
 
 
 @app.exception_handler(RetryExceeded)
