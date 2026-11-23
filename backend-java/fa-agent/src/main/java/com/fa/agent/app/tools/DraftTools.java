@@ -250,6 +250,8 @@ public class DraftTools {
             case "liveness" -> "活体校验未通过";
             case "identity" -> "首末帧身份不一致";
             case "multi_face" -> "画面中出现多个人脸";
+            case "passive" -> "疑似屏幕翻拍（被动活体）";
+            case "disguise" -> "面部有遮挡或伪装物（口罩/墨镜/帽子）";
             case "" -> "无失败门禁记录";
             default -> gate;
         };

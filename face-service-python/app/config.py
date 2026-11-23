@@ -39,7 +39,12 @@ class ModelConfig:
     liveness: str = "minifasnet_v2.onnx"
 
     # SCRFD
-    det_size: int = 640
+    # det_size=320（2026-11-22 恢复 hold=2 的前置优化）：客户端上传帧就是 320×240，
+    # 旧值 640 等于把小帧放大一倍再检测——纯浪费（det 460ms → ~130ms），检测
+    # 分数与关键点精度在本机 60 身份回归里无可测差异。可用 FA_DET_SIZE 覆盖，
+    # 若某些设备检出质量异常可回 640 排查（恢复 hold=2 后单帧 ~300ms，回 640
+    # 会退回 ~560ms，hold=2 的时序余量消失）。
+    det_size: int = field(default_factory=lambda: _get_int("DET_SIZE", 320))
     det_thresh: float = 0.5
     nms_thresh: float = 0.4
 
@@ -87,6 +92,53 @@ class GateConfig:
     liveness_samples: int = field(default_factory=lambda: _get_int("LIVENESS_SAMPLES", 5))
     identity_sim: float = field(default_factory=lambda: _get_float("IDENTITY_SIM", 0.55))
 
+    # ---- 被动活体线索（2026-11-22，摩尔纹/屏幕反光/频域峰值）----
+    # 只否决不放行：真实人脸不触发，加入不改变误拒率，只降低屏幕重放通过率。
+    # **门禁默认关闭**：三族特征在本机做了三轮合成标定（对齐空间 / 整帧 /
+    # 人脸原生裁剪），合成重放与 bona fide 分布全部重合（prom p50 4.9 vs 4.9，
+    # hf p50 0.34 vs 0.37）——bicubic 重采样链复现不了屏幕摩尔纹的真实物理
+    # （亚像素采样相位、像素结构、背光、传感器噪声）。按「阈值必须实测得出」
+    # 的项目铁律，上线先只记特征（finish 日志，隐私安全：每帧 3 个浮点数），
+    # 真机采集标定后用 PASSIVE_GATE=1 开启。
+    # 下列阈值为**占位值**（合成 bona fide max × 1.2），开启前必须重标。
+    passive_gate_enabled: bool = field(
+        default_factory=lambda: _get("PASSIVE_GATE", "0") == "1")
+    passive_peak_max: float = field(
+        default_factory=lambda: _get_float("PASSIVE_PEAK_MAX", 12.5))
+    passive_hf_max: float = field(
+        default_factory=lambda: _get_float("PASSIVE_HF_MAX", 0.72))
+    passive_clip_max: float = field(
+        default_factory=lambda: _get_float("PASSIVE_CLIP_MAX", 0.42))
+    passive_samples: int = field(default_factory=lambda: _get_int("PASSIVE_SAMPLES", 5))
+
+
+@dataclass
+class DisguiseConfig:
+    """伪装/遮挡识别（CR-025，§10.5 FACE 组）。阈值来自五轮 CASIA 标定，勿凭感觉调。
+
+    与被动活体门禁（passive）不同：遮挡对干净脸**不触发**（干净脸分布与
+    阈值之间隔着 2~3 倍余量），所以默认开启不改变误拒率基线；已知盲区
+    （棕色织物口罩、齐刘海、针织帽）向「不拦」侧退化，由匹配门禁兜底。
+    """
+
+    enabled: bool = field(default_factory=lambda: _get("DISGUISE_ENABLED", "1") == "1")
+    # 帽子分支独立开关：齐刘海/针织帽与「布料级平坦」同分布，误拒时先关它。
+    hat_enabled: bool = field(default_factory=lambda: _get("DISGUISE_HAT", "1") == "1")
+    # 下半脸必盖区肤色占比上限（干净脸实测 min 0.21，取其下探针值 0.10）。
+    # ★ 原设计的「嘴区 std ≤24」分支已废除：正确唇区上闭唇天然平坦
+    #   （实测 23.95），与布料不可分——判据只留肤色单通道。
+    mask_skin_max: float = field(default_factory=lambda: _get_float("DISGUISE_MASK_SKIN_MAX", 0.10))
+    # 眼框灰度 std 上限（纹理镜面 ≤ 13.7；闭眼代理最高 19.4，但被亮度条件排除）。
+    eye_std_max: float = field(default_factory=lambda: _get_float("DISGUISE_EYE_STD_MAX", 15))
+    # 眼框相对亮度上限（干净/闭眼 ≥ 0.72；镜面 ≤ 0.21）。与 std 双条件 AND。
+    eye_rel_max: float = field(default_factory=lambda: _get_float("DISGUISE_EYE_REL_MAX", 0.50))
+    # 额头带灰度 std 上限（干净额头 min 36.3，平布代理 ≤ 24.6）。
+    forehead_std_max: float = field(default_factory=lambda: _get_float("DISGUISE_FOREHEAD_STD_MAX", 16))
+    # 连续遮挡中止帧数（frame 路径，与 no_face/multi_face 同构）。
+    occl_frames: int = field(default_factory=lambda: _get_int("DISGUISE_OCCL_FRAMES", 3))
+    # finish 门禁：遮挡帧占比上限（occl_total / 有脸帧数）。
+    occl_frame_max: float = field(default_factory=lambda: _get_float("DISGUISE_OCCL_FRAME_MAX", 0.50))
+
 
 @dataclass
 class ActionConfig:
@@ -126,12 +178,13 @@ class ActionConfig:
     # drop_ratio 再要求落到基线的 60% 以下，避免「本来就很暗的眼睛」靠绝对量过关。
     eye_dark_drop: float = field(default_factory=lambda: _get_float("EYE_DARK_DROP", 0.06))
     eye_drop_ratio: float = field(default_factory=lambda: _get_float("EYE_DROP_RATIO", 0.60))
-    # hold=1（2026-11-22 真机 1.25fps 采样修正）：服务端单帧 det 460ms + arcface 260ms
-    # ≈ 800ms，前端 4fps 采集 + 串行上传（MAX_QUEUE=4）后有效入库只有 ~1.25fps。
-    # 闭眼约 1 秒在 800ms 帧距下只有 1~2 帧落窗，hold=2 要求"连续 2 帧"时按文案做
-    # 也判不过（转头保持半秒更是常态 0 帧）。hold=1 的单帧误判率：闭眼 3.9σ ≈ 5e-5，
-    # 转头 11.5σ ≈ 0；动作随机抽签下预录视频无法预知被抽到哪个动作，1 帧不构成攻击面。
-    eye_hold_frames: int = field(default_factory=lambda: _get_int("EYE_HOLD_FRAMES", 1))
+    # hold=2（2026-11-22 晚恢复，此前一天因 1.25fps 采样降到 1）：恢复的前提是
+    # 单帧耗时从 ~800ms 压到 ~300ms（det 640→320 + 隔帧 ArcFace，见 ModelConfig
+    # 与 ChallengeService.frame）。服务端消化率 ~3fps 后，"保持约 1 秒"的动作
+    # 落 2~3 帧，hold=2 的时序可达性成立——3.9σ 的判据灵敏度终于和采样率对齐。
+    # hold=1 期间的单帧噪声风险（转头滚转残余 0.108 距阈值 0.12 仅 1σ）由
+    # 反向段否决 + 闭眼姿态闸兜底，两层互补。
+    eye_hold_frames: int = field(default_factory=lambda: _get_int("EYE_HOLD_FRAMES", 2))
     # 可做性门槛：基线眼区太暗（浓妆/逆光）就没有下降空间；瞳距太小（人太远）
     # 眼框只有十几个像素，统计量不可信。命中门槛的动作不参与随机。
     eye_base_min: float = 0.10
@@ -149,7 +202,10 @@ class ActionConfig:
     # 整帧滚转 ±15/±30° 的漂移 mean 0.030 / max 0.108 —— 极端歪头仍可能被算成
     # 转头，这是**单向**的误放行（不会误拒），代价可接受，见 CR-021「已知限制」。
     turn_delta: float = field(default_factory=lambda: _get_float("TURN_DELTA", 0.12))
-    turn_hold_frames: int = field(default_factory=lambda: _get_int("TURN_HOLD_FRAMES", 1))
+    # hold=2（2026-11-22 晚恢复）：与 eye 同步，前提是单帧 ~300ms（det 320 +
+    # 隔帧 ArcFace），"保持约 1 秒"落 2~3 帧。转头动作逐帧跑 ArcFace（frontal_emb
+    # 要在每帧上找最正脸），单帧 ~430ms，3s 窗口仍落 6~7 帧，余量足够。
+    turn_hold_frames: int = field(default_factory=lambda: _get_int("TURN_HOLD_FRAMES", 2))
     # 基线已经明显偏头（|代理| > 0.10）时，不再要求「继续往同侧转」——
     # 再转 20° 会滑出检测范围，学生照做反而被 FA-4001 中止。
     turn_base_max: float = 0.10
@@ -218,6 +274,7 @@ class Settings:
     quality: FaceQualityConfig = field(default_factory=FaceQualityConfig)
     match: MatchConfig = field(default_factory=MatchConfig)
     gates: GateConfig = field(default_factory=GateConfig)
+    disguise: DisguiseConfig = field(default_factory=DisguiseConfig)
     action: ActionConfig = field(default_factory=ActionConfig)
     challenge: ChallengeConfig = field(default_factory=ChallengeConfig)
     redis: RedisConfig = field(default_factory=RedisConfig)

@@ -53,6 +53,7 @@
     { "code": "FA-4006", "http": 400, "domain": "人脸", "message": "人脸档案未通过审核", "note": "face_profile.status != ACTIVE 时禁止签到（D5）" },
     { "code": "FA-4007", "http": 400, "domain": "人脸", "message": "身份校验未通过，请本人操作", "note": "门禁2：首末帧向量余弦 < IDENTITY_SIM，拦「中途换人」" },
     { "code": "FA-4008", "http": 409, "domain": "人脸", "message": "这张人脸已用于其他学生档案", "note": "建档同脸查重（CR-014）：任一新样本与「他人 ACTIVE/PENDING_REVIEW 档案」的余弦 ≥ DUP_FACE_SIM(0.55) 即拒绝，且不写向量/同意记录；响应与审计都不得带对方身份或相似度原值（§13.4）" },
+    { "code": "FA-4009", "http": 400, "domain": "人脸", "message": "检测到面部遮挡或伪装物", "note": "伪装/遮挡识别（CR-025）：口罩/墨镜/帽子判据命中，start 基线即时拒绝、frame 连续 3 帧中止、finish 遮挡帧占比 >0.50；消息带种类与摘除指令" },
 
     { "code": "FA-5001", "http": 409, "domain": "申诉", "message": "该记录已有待处理申诉", "note": "数据库侧由 uk_appeal_pending 生成列兜底" },
     { "code": "FA-5002", "http": 403, "domain": "申诉", "message": "该申诉不在你的处理范围内" },

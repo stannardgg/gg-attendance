@@ -423,7 +423,7 @@ components:
           type: string
           nullable: true
           description: |
-            卡在哪道门：liveness / identity / action_count / match / multi_face / no_face。
+            卡在哪道门：liveness / identity / action_count / match / multi_face / no_face / passive / disguise（CR-025）。
             仅作排障记录，不参与判定——无论卡在哪道门，消耗的都是同一次机会。
 
     CheckinAttemptData:

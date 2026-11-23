@@ -109,6 +109,18 @@ class ChallengeState:
     live_probs: list[float] = field(default_factory=list)
     first_emb: list[float] = field(default_factory=list)
     last_emb: list[float] = field(default_factory=list)
+    # 被动活体线索（2026-11-22）：非轴向频域峰显著性 / 高频占比 / 整帧过曝白斑。
+    # 逐帧记录、finish 全量落日志——即使 PASSIVE_GATE=0（默认关）也要积累
+    # 真实标定语料；每帧 3 个浮点数，不落原图（§13.4）。
+    passive_peak: list[float] = field(default_factory=list)
+    passive_hf: list[float] = field(default_factory=list)
+    passive_clip: list[float] = field(default_factory=list)
+    # 伪装/遮挡（CR-025）：连续遮挡帧（frame 中止用）、遮挡总帧（finish 门禁
+    # 占比用）、出现过的类别码（文案归因）。部署前的存量 challenge 缺这三个
+    # 字段时反序列化取默认值 0/[]，语义 = 无遮挡记录，与旧状态一致。
+    occl_run: int = 0
+    occl_total: int = 0
+    occl_kinds: list[str] = field(default_factory=list)
 
 
 class ChallengeStore:

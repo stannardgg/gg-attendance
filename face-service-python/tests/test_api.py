@@ -108,7 +108,8 @@ def test_start_and_frame_and_finish(client, face_img):
     assert r.status_code == 200
     result = r.json()["data"]
     assert result["frames"] == 6
-    assert set(result["gates"]) == {"liveness", "identity", "actionCount", "match"}
+    # 被动活体（2026-11-22）与伪装遮挡（CR-025）加入 gates：关闭的门禁也返回
+    assert set(result["gates"]) == {"liveness", "identity", "actionCount", "match", "passive", "disguise"}
     # 静态照片：活体必拒
     assert result["gates"]["liveness"]["passed"] is False
 
