@@ -497,6 +497,77 @@ paths:
         '404': { $ref: '#/components/responses/NotFound' }
       x-error-codes: [FA-2001]
 
+  # --- CR-026 课程授权学生：班级名单之外的课程级签到授权（追加，非选课） ---
+  /api/v1/admin/courses/{courseId}/grants:
+    get:
+      tags: [admin-course]
+      summary: 课程授权学生名单（分页）
+      operationId: listCourseGrants
+      parameters:
+        - name: courseId
+          in: path
+          required: true
+          schema: { type: integer, format: int64 }
+        - $ref: '#/components/parameters/Page'
+        - $ref: '#/components/parameters/Size'
+      responses:
+        '200':
+          description: 分页名单（含学生姓名/学号/班级展示冗余）
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CourseGrantPageResp' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+      x-error-codes: [FA-2001, FA-2006]
+    post:
+      tags: [admin-course]
+      summary: 授权学生（发起签到时并入应到快照）
+      operationId: createCourseGrant
+      parameters:
+        - name: courseId
+          in: path
+          required: true
+          schema: { type: integer, format: int64 }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CourseGrantReq' }
+      responses:
+        '200':
+          description: 已授权
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CourseGrantResp' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '409': { $ref: '#/components/responses/Conflict' }
+      x-error-codes: [FA-2001, FA-2006, FA-2008]
+
+  /api/v1/admin/courses/{courseId}/grants/{studentId}:
+    delete:
+      tags: [admin-course]
+      summary: 撤销授权（只影响之后新发起的会话）
+      operationId: deleteCourseGrant
+      parameters:
+        - name: courseId
+          in: path
+          required: true
+          schema: { type: integer, format: int64 }
+        - name: studentId
+          in: path
+          required: true
+          schema: { type: integer, format: int64 }
+      responses:
+        '200':
+          description: 已撤销
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Result' }
+        '403': { $ref: '#/components/responses/Forbidden' }
+        '404': { $ref: '#/components/responses/NotFound' }
+      x-error-codes: [FA-2001, FA-2006]
+
   # ===================================================================
   # admin · 学生
   # ===================================================================
@@ -1666,6 +1737,48 @@ components:
         - type: object
           properties:
             data: { $ref: '#/components/schemas/DeleteResult' }
+
+    # ---------- CR-026 课程授权学生 ----------
+    CourseGrantReq:
+      type: object
+      additionalProperties: false
+      required: [studentId]
+      description: ★ 不含 classId——学生的班级由后端读 student.class_id 现值决定，「选择班级」只是前端选择器交互
+      properties:
+        studentId: { type: integer, format: int64 }
+
+    CourseGrant:
+      type: object
+      description: 授权行。业务键只有 courseId + studentId；姓名/学号/班级为展示冗余
+      properties:
+        id: { type: integer, format: int64 }
+        courseId: { type: integer, format: int64 }
+        studentId: { type: integer, format: int64 }
+        studentName: { type: string, nullable: true }
+        studentNo: { type: string, nullable: true }
+        classId: { type: integer, format: int64, nullable: true }
+        className: { type: string, nullable: true }
+        grantedBy: { type: integer, format: int64, nullable: true, description: 操作人 account.id（审计冗余） }
+        createdAt: { type: string, format: date-time }
+
+    CourseGrantResp:
+      allOf:
+        - $ref: '#/components/schemas/Result'
+        - type: object
+          properties:
+            data: { $ref: '#/components/schemas/CourseGrant' }
+
+    CourseGrantPageResp:
+      allOf:
+        - $ref: '#/components/schemas/Result'
+        - type: object
+          properties:
+            data:
+              allOf:
+                - $ref: '#/components/schemas/PageMeta'
+                - type: object
+                  properties:
+                    items: { type: array, items: { $ref: '#/components/schemas/CourseGrant' } }
 
     # ---------- 学生 ----------
     Student:

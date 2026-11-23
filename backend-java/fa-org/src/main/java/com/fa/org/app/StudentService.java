@@ -181,6 +181,8 @@ public class StudentService {
         jdbc.update("delete from face_profile where student_id = ?", id);
         // 向量也要清：否则下一次快照拉取仍会把它发给 Python，被删学生还能被认出来
         jdbc.update("delete from face_vector where student_id = ?", id);
+        // CR-026：课程授权也要清，否则发起签到时快照会并进一个已不存在的学生
+        jdbc.update("delete from course_student_grant where student_id = ?", id);
         audit.write("STUDENT_DELETE", "STUDENT", id, "删除学生 " + entity.getStudentNo());
         return new ClassDtos.DeleteResult(id, false);
     }

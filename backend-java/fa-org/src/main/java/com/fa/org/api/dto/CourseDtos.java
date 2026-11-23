@@ -1,6 +1,7 @@
 package com.fa.org.api.dto;
 
 import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Pattern;
 import jakarta.validation.constraints.Size;
 import java.time.LocalDateTime;
@@ -53,5 +54,26 @@ public final class CourseDtos {
             String remark,
             LocalDateTime createdAt,
             LocalDateTime updatedAt) {
+    }
+
+    // ---- CR-026 课程授权学生（挂课程子资源 /courses/{courseId}/grants） ----
+
+    public record GrantReq(@NotNull Long studentId) {
+    }
+
+    /**
+     * 授权名单行。学生姓名/学号/班级为展示冗余——授权表的业务键只有
+     * courseId + studentId，名字拼进来是为了让教师对得上人。
+     */
+    public record GrantResp(
+            Long id,
+            Long courseId,
+            Long studentId,
+            String studentName,
+            String studentNo,
+            Long classId,
+            String className,
+            Long grantedBy,
+            LocalDateTime createdAt) {
     }
 }
