@@ -86,6 +86,19 @@ export interface StudentRow {
   createdAt: string
 }
 
+/** CR-026 课程授权学生：班级名单之外的课程级签到授权（追加，非选课）。 */
+export interface CourseGrantRow {
+  id: number
+  courseId: number
+  studentId: number
+  studentName?: string
+  studentNo?: string
+  classId?: number
+  className?: string
+  grantedBy?: number
+  createdAt: string
+}
+
 export interface TeacherRow {
   id: number
   teacherNo: string

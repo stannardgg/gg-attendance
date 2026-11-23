@@ -91,11 +91,19 @@ public class SessionService {
         s.setAllowAppeal(req.allowAppeal() == null || req.allowAppeal());
         sessionMapper.insert(s);
 
-        // 快照应到名单（与 courseId 无关，D7）
+        // 快照应到名单：班级在读学生 ∪ 该课程授权学生（CR-026），UNION 天然去重。
+        // 班级部分与 courseId 无关（D7 主体不动）；授权部分是**追加**口径——
+        // 一门课只给散生授权，整班仍走班级点名。授权只影响新会话，不追溯已存续会话。
         int expected = jdbc.update("""
                 INSERT INTO session_expected (session_id, student_id, class_id)
-                SELECT ?, id, class_id FROM student WHERE class_id = ? AND status = 'ACTIVE'
-                """, s.getId(), req.classId());
+                SELECT ?, s.id, s.class_id FROM student s
+                WHERE s.class_id = ? AND s.status = 'ACTIVE'
+                UNION
+                SELECT ?, g.student_id, s2.class_id
+                FROM course_student_grant g
+                JOIN student s2 ON s2.id = g.student_id
+                WHERE g.course_id = ? AND s2.status = 'ACTIVE'
+                """, s.getId(), req.classId(), s.getId(), req.courseId());
 
         audit.write("SESSION_CREATE", "SESSION", s.getId(),
                 "发起签到 " + clazz.getName() + " × " + course.getName() + "，应到 " + expected);

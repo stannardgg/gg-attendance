@@ -4,7 +4,7 @@ import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { api, messageOf } from '@/shared/api/client'
 import { isAdmin } from '@/shared/store/auth'
-import type { CourseRow, TeacherRow } from '@/shared/api/types'
+import type { ClassRow, CourseGrantRow, CourseRow, StudentRow, TeacherRow } from '@/shared/api/types'
 
 const router = useRouter()
 const loading = ref(false)
@@ -174,6 +174,118 @@ onMounted(() => {
   load()
   loadTeachers()
 })
+
+// ---- CR-026 授权学生：班级名单之外的课程级签到授权 ----
+// 后端语义：发起签到时授权学生并入应到快照（追加口径）；已存续会话不追溯。
+const grantDialog = reactive({ open: false, course: null as CourseRow | null })
+const GRANT_PAGE_SIZE = 10
+const grantLoading = ref(false)
+const grants = ref<CourseGrantRow[]>([])
+const grantTotal = ref(0)
+const grantPage = ref(1)
+// 「选择班级 → 选学生」两级联动：classId 只用于筛选学生，不随授权提交
+const grantClasses = ref<ClassRow[]>([])
+const grantClassId = ref<number | undefined>()
+const grantStudents = ref<StudentRow[]>([])
+const grantStudentId = ref<number | undefined>()
+const studentsLoading = ref(false)
+const granting = ref(false)
+
+async function openGrant(row: CourseRow) {
+  grantDialog.course = row
+  grantDialog.open = true
+  grantPage.value = 1
+  grantClassId.value = undefined
+  grantStudentId.value = undefined
+  grantStudents.value = []
+  loadGrants()
+  loadGrantClasses()
+}
+
+async function loadGrants() {
+  if (!grantDialog.course) return
+  grantLoading.value = true
+  try {
+    const data = await api.get<{ items: CourseGrantRow[]; total: number }>(
+      `/api/v1/admin/courses/${grantDialog.course.id}/grants`,
+      { page: grantPage.value, size: GRANT_PAGE_SIZE }
+    )
+    grants.value = data.items ?? []
+    grantTotal.value = data.total ?? 0
+  } catch (err) {
+    ElMessage.error(messageOf(err))
+  } finally {
+    grantLoading.value = false
+  }
+}
+
+async function loadGrantClasses() {
+  try {
+    const data = await api.get<{ items: ClassRow[] }>('/api/v1/admin/classes', {
+      size: 200,
+      status: 'ACTIVE'
+    })
+    grantClasses.value = data.items ?? []
+  } catch (err) {
+    ElMessage.error(messageOf(err))
+  }
+}
+
+async function onGrantClassChange() {
+  grantStudentId.value = undefined
+  grantStudents.value = []
+  if (!grantClassId.value) return
+  studentsLoading.value = true
+  try {
+    const data = await api.get<{ items: StudentRow[] }>('/api/v1/admin/students', {
+      classId: grantClassId.value,
+      status: 'ACTIVE',
+      size: 200
+    })
+    grantStudents.value = data.items ?? []
+  } catch (err) {
+    ElMessage.error(messageOf(err))
+  } finally {
+    studentsLoading.value = false
+  }
+}
+
+async function addGrant() {
+  if (!grantDialog.course || !grantStudentId.value) return
+  granting.value = true
+  try {
+    await api.post<CourseGrantRow>(`/api/v1/admin/courses/${grantDialog.course.id}/grants`, {
+      studentId: grantStudentId.value
+    })
+    ElMessage.success('已授权')
+    grantStudentId.value = undefined
+    await loadGrants()
+  } catch (err) {
+    ElMessage.error(messageOf(err))
+  } finally {
+    granting.value = false
+  }
+}
+
+async function removeGrant(row: CourseGrantRow) {
+  if (!grantDialog.course) return
+  try {
+    await ElMessageBox.confirm(
+      `撤销后该学生不能进入「${grantDialog.course.name}」新发起的签到，历史考勤不受影响。确定撤销吗？`,
+      '撤销授权',
+      { type: 'warning' }
+    )
+  } catch {
+    return
+  }
+  try {
+    await api.del<void>(`/api/v1/admin/courses/${grantDialog.course.id}/grants/${row.studentId}`)
+    ElMessage.success('已撤销')
+    await loadGrants()
+  } catch (err) {
+    ElMessage.error(messageOf(err))
+  }
+}
 </script>
 
 <template>
@@ -211,9 +323,10 @@ onMounted(() => {
         <el-table-column prop="createdAt" label="创建时间" width="170">
           <template #default="{ row }">{{ (row.createdAt || '').replace('T', ' ').slice(0, 19) }}</template>
         </el-table-column>
-        <el-table-column label="操作" width="250" fixed="right">
+        <el-table-column label="操作" width="310" fixed="right">
           <template #default="{ row }">
             <el-button link type="primary" @click="openEdit(row)">编辑</el-button>
+            <el-button v-if="row.status === 'ACTIVE'" link type="primary" @click="openGrant(row)">授权学生</el-button>
             <el-button link type="primary" @click="router.push(`/attendance?courseId=${row.id}`)">签到记录</el-button>
             <el-button v-if="row.status === 'ACTIVE'" link type="warning" @click="archive(row)">归档</el-button>
             <el-button link type="danger" @click="remove(row)">删除</el-button>
@@ -252,7 +365,7 @@ onMounted(() => {
             <el-option v-for="t in teachers" :key="t.id" :label="`${t.name}（${t.teacherNo}）`" :value="t.id" />
           </el-select>
           <div class="field-tip">
-            仅作归属标注，不等于数据授权；教师能否看到本课程由「教师管理 → 授权范围」决定
+            保存后自动为该教师授予本课程的数据权限（等同「教师与授权 → 授权范围」的授予，教师端立即可见）；撤销请到授权范围中操作
           </div>
         </el-form-item>
         <el-form-item label="备注">
@@ -264,6 +377,62 @@ onMounted(() => {
         <el-button type="primary" :loading="saving" @click="save">保存</el-button>
       </template>
     </el-dialog>
+
+    <!-- CR-026 授权学生抽屉 -->
+    <el-drawer v-model="grantDialog.open" :title="`授权学生 · ${grantDialog.course?.name ?? ''}`" size="560px">
+      <el-alert
+        type="info"
+        :closable="false"
+        show-icon
+        title="班级学生默认可签到；这里给班级之外的散生（跨班选修、转班补授）单独授权，发起签到时会并入应到名单。授权变动只影响之后新发起的签到，已存续会话不受影响。"
+        style="margin-bottom: 12px"
+      />
+      <div class="grant-picker">
+        <el-select v-model="grantClassId" placeholder="选择班级" filterable style="flex: 1" @change="onGrantClassChange">
+          <el-option v-for="c in grantClasses" :key="c.id" :label="c.name" :value="c.id" />
+        </el-select>
+        <el-select
+          v-model="grantStudentId"
+          placeholder="选择学生"
+          filterable
+          :loading="studentsLoading"
+          :disabled="!grantClassId"
+          style="flex: 1"
+        >
+          <el-option v-for="s in grantStudents" :key="s.id" :label="`${s.name}（${s.studentNo}）`" :value="s.id" />
+        </el-select>
+        <el-button type="primary" :disabled="!grantStudentId" :loading="granting" @click="addGrant">授权</el-button>
+      </div>
+
+      <el-table :data="grants" v-loading="grantLoading" size="small">
+        <el-table-column prop="studentName" label="学生" width="90">
+          <template #default="{ row }">{{ row.studentName || '—' }}</template>
+        </el-table-column>
+        <el-table-column prop="studentNo" label="学号" width="110" />
+        <el-table-column prop="className" label="所在班级" min-width="120">
+          <template #default="{ row }">{{ row.className || '—' }}</template>
+        </el-table-column>
+        <el-table-column label="授权时间" width="100">
+          <template #default="{ row }">{{ (row.createdAt || '').slice(0, 10) }}</template>
+        </el-table-column>
+        <el-table-column label="" width="70">
+          <template #default="{ row }">
+            <el-button link type="danger" @click="removeGrant(row)">移除</el-button>
+          </template>
+        </el-table-column>
+        <template #empty>
+          <el-empty description="还没有授权学生" :image-size="60" />
+        </template>
+      </el-table>
+      <el-pagination
+        v-model:current-page="grantPage"
+        :page-size="GRANT_PAGE_SIZE"
+        :total="grantTotal"
+        layout="total, prev, pager, next"
+        style="margin-top: 10px; justify-content: flex-end"
+        @current-change="loadGrants"
+      />
+    </el-drawer>
   </div>
 </template>
 
@@ -281,6 +450,11 @@ onMounted(() => {
   color: #909399;
   line-height: 1.5;
   padding-top: 2px;
+}
+.grant-picker {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
 }
 :deep(.hl) {
   background: #ecf5ff !important;
