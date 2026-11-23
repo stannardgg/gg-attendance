@@ -191,6 +191,56 @@ class OrgIT extends ItBase {
         assertThat(code(dup)).isEqualTo("FA-2002");
     }
 
+    /* ---------------- CR-027 开课教师同步授权 ---------------- */
+
+    @Test
+    @DisplayName("开课教师同步授权：建课带 owner 教师立即可见；重复保存幂等；改 owner 新教师立即可见")
+    void ownerTeacherSyncsScope() {
+        String admin = login(ADMIN, ADMIN_PWD);
+        String s = suffix();
+
+        Map<String, Object> tA = createTeacher(admin, "UA" + s);
+        Map<String, Object> tB = createTeacher(admin, "UB" + s);
+        long idA = (long) tA.get("id");
+        long idB = (long) tB.get("id");
+
+        // 建课带开课教师 A → 不再需要去授权范围手动授，A 登录即可见
+        ResponseEntity<JsonNode> created = post("/api/v1/admin/courses",
+                Map.of("code", "KU" + s.toUpperCase(), "name", "同步授权课 " + s,
+                        "ownerTeacherId", idA),
+                admin);
+        assertThat(created.getStatusCode().value()).as("建课失败：%s", created.getBody()).isEqualTo(200);
+        long courseId = created.getBody().path("data").path("id").asLong();
+
+        String tokenA = login((String) tA.get("no"), "Teacher12345");
+        List<Long> visibleA = items(get("/api/v1/admin/courses?size=100", tokenA))
+                .stream().map(n -> n.path("id").asLong()).toList();
+        assertThat(visibleA).contains(courseId);
+
+        // 重复保存（owner 不变）→ 幂等：不得因授权已存在而报错
+        ResponseEntity<JsonNode> resave = put("/api/v1/admin/courses/" + courseId,
+                Map.of("name", "同步授权课改 " + s, "ownerTeacherId", idA), admin);
+        assertThat(resave.getStatusCode().value()).as("重复保存失败：%s", resave.getBody()).isEqualTo(200);
+
+        // owner 指向不存在的教师 → 同步授权前置校验拒绝
+        ResponseEntity<JsonNode> ghost = put("/api/v1/admin/courses/" + courseId,
+                Map.of("ownerTeacherId", 999999999L), admin);
+        assertThat(ghost.getStatusCode().value()).isEqualTo(404);
+        assertThat(code(ghost)).isEqualTo("FA-2001");
+
+        // 改开课教师为 B → B 立即可见；A 的旧授权仍保留（在授权范围中可撤销）
+        ResponseEntity<JsonNode> reassign = put("/api/v1/admin/courses/" + courseId,
+                Map.of("ownerTeacherId", idB), admin);
+        assertThat(reassign.getStatusCode().value()).isEqualTo(200);
+
+        String tokenB = login((String) tB.get("no"), "Teacher12345");
+        List<Long> visibleB = items(get("/api/v1/admin/courses?size=100", tokenB))
+                .stream().map(n -> n.path("id").asLong()).toList();
+        assertThat(visibleB).contains(courseId);
+        assertThat(items(get("/api/v1/admin/courses?size=100", tokenA))
+                .stream().map(n -> n.path("id").asLong()).toList()).contains(courseId);
+    }
+
     /* ---------------- CR-019 教师资料修改申请 ---------------- */
 
     @Test
