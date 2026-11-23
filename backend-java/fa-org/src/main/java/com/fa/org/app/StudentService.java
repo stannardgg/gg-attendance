@@ -174,7 +174,12 @@ public class StudentService {
         if (attendance != null && attendance > 0) {
             entity.setStatus("ARCHIVED");
             studentMapper.updateById(entity);
-            audit.write("STUDENT_ARCHIVE", "STUDENT", id, "有考勤记录，改为归档");
+            // CR-028：归档=不再在校使用，人脸数据失去处理必要性（识别快照本就只含
+            // ACTIVE 学生），物理清除向量与档案，落实最小必要与保留期限口径。
+            jdbc.update("delete from face_profile where student_id = ?", id);
+            jdbc.update("delete from face_vector where student_id = ?", id);
+            audit.write("STUDENT_ARCHIVE", "STUDENT", id,
+                    "有考勤记录，改为归档；人脸数据已同步清除（CR-028）");
             return new ClassDtos.DeleteResult(id, true);
         }
         studentMapper.deleteById(id);
@@ -327,9 +332,10 @@ public class StudentService {
 
         audit.write("FACE_REVIEW", "STUDENT", studentId,
                 "人脸审核：" + profile.getStatus());
+        // 同意态（CR-028）仅学生本人可见，教师审核响应不回传，置 null
         return new ScopeDtos.FaceStatusResp(profile.getStudentId(), profile.getStatus(),
                 profile.getSampleCount(), profile.getSubmittedAt(), profile.getReviewedAt(),
-                profile.getRejectReason());
+                profile.getRejectReason(), null, null);
     }
 
     private FaceProfile newFaceProfile(long studentId) {

@@ -230,9 +230,11 @@ paths:
       description: |
         一次提交 5~10 张样本的引用键（图片本身已通过 `/face-api/enroll/sample` 逐张上传并完成质量校验）。
         提交后 `face_profile.status` 转 `PENDING_REVIEW`，需教师审核通过才可变 `ACTIVE`（D5）。
-        调用前必须已记录「单独同意」（`account.face_consent_at`），否则 400（§13.4）。
+        调用前必须已通过 `POST /api/v1/mobile/face/consent` 记录当前生效版本（v2）的「单独同意」
+        （CR-028：事件表 `face_consent_record` + `account.face_consent_at/version`）；
+        consentVersion 与当前版本不符或无对应 ACCEPT 事件时 400 `FA-4010`（§13.4，服务端强校验）。
         「一人一档」：提交前对全库他人档案做同脸查重（CR-014），命中即 `FA-4008` 整单拒绝，
-        不写向量、不写同意时间戳、不改档案状态。
+        不写向量、不改档案状态。
       operationId: enrollFace
       requestBody:
         required: true
@@ -246,20 +248,67 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/FaceStatusResp' }
         '400': { $ref: '#/components/responses/BadRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
         '409': { $ref: '#/components/responses/Conflict' }
-      x-error-codes: [FA-4001, FA-4002, FA-4008]
+      x-error-codes: [FA-2001, FA-4010, FA-4001, FA-4002, FA-4008]
 
   /api/v1/mobile/face/status:
     get:
       tags: [mobile]
-      summary: 本人人脸档案状态
+      summary: 本人人脸档案状态（含当前同意态）
       operationId: faceStatus
       responses:
         '200':
-          description: 状态
+          description: 状态（consentVersion/consentAt 为撤回或删除后的空态）
           content:
             application/json:
               schema: { $ref: '#/components/schemas/FaceStatusResp' }
+
+  /api/v1/mobile/face/consent:
+    post:
+      tags: [mobile]
+      summary: 记录人脸采集「单独同意」（CR-028）
+      description: |
+        PIPL §29：人脸属敏感个人信息，采集前必须取得单独同意——学生阅读告知全文
+        （docs/compliance/face-consent-notice-v2.md）后显式点「同意」时调用；
+        勾选框、静默继续、与用户协议捆绑勾选均不构成单独同意。
+        事件写入 `face_consent_record`（只增不改），`account.face_consent_at/version`
+        保留当前态。幂等：同账号同版本重复调用不产生新事件、不刷新首次同意时间。
+        摄像头必须在本次调用成功之后才能启动（前端 EnrollView 强制）。
+        consentVersion 非当前生效版本时 400 `FA-4010`。
+      operationId: recordFaceConsent
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/FaceConsentReq' }
+      responses:
+        '200':
+          description: 已记录（返回最新档案状态与同意态）
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/FaceStatusResp' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+      x-error-codes: [FA-4010]
+
+  /api/v1/mobile/face/data-deletion:
+    post:
+      tags: [mobile]
+      summary: 删除本人人脸数据并撤回同意（数据主体删除权，CR-028）
+      description: |
+        物理删除本人 `face_vector`（加密向量）与 `face_profile`，写 WITHDRAW 事件并
+        清空 `account.face_consent_*`。任意档案状态（PENDING_REVIEW / REJECTED / ACTIVE）
+        均可调用；无数据时 404 `FA-2001`。语义边界：由既往签到产生的考勤记录属业务数据，
+        不随本次删除清除。删后档案回到 NONE，可重新采集（须重新同意）。
+      operationId: deleteFaceData
+      responses:
+        '200':
+          description: 已删除（返回删除后的档案状态，status=NONE）
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/FaceStatusResp' }
+        '404': { $ref: '#/components/responses/NotFound' }
+      x-error-codes: [FA-2001]
 
   /api/v1/mobile/appeals:
     post:
@@ -1869,7 +1918,19 @@ components:
         consentVersion:
           type: string
           maxLength: 16
-          description: 用户勾选的同意书版本；服务端写 account.face_consent_at/version
+          description: |
+            必须等于当前生效的同意书版本（v2），且已有对应 ACCEPT 事件
+            （POST /api/v1/mobile/face/consent 落库），否则 404 FA-2001（CR-028 服务端强校验）
+
+    FaceConsentReq:
+      type: object
+      additionalProperties: false
+      required: [consentVersion]
+      properties:
+        consentVersion:
+          type: string
+          maxLength: 16
+          description: 同意书版本，必须是服务端当前生效版本（v2）；旧版本视为已停用
 
     FaceReviewReq:
       type: object
@@ -1891,6 +1952,15 @@ components:
         submittedAt: { type: string, format: date-time, nullable: true }
         reviewedAt: { type: string, format: date-time, nullable: true }
         rejectReason: { type: string, nullable: true }
+        consentVersion:
+          type: string
+          nullable: true
+          description: 当前生效的同意书版本；撤回或删除人脸数据后为 null（CR-028）
+        consentAt:
+          type: string
+          format: date-time
+          nullable: true
+          description: 首次单独同意的时间；撤回或删除人脸数据后为 null（CR-028）
 
     FaceStatusResp:
       allOf:

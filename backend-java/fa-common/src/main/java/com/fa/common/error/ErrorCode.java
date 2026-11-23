@@ -48,6 +48,7 @@ public enum ErrorCode {
     IDENTITY_MISMATCH("FA-4007", HttpStatus.BAD_REQUEST, "身份校验未通过，请本人操作"),
     FACE_ALREADY_ENROLLED("FA-4008", HttpStatus.CONFLICT, "这张人脸已用于其他学生档案"),
     FACE_DISGUISED("FA-4009", HttpStatus.BAD_REQUEST, "检测到面部遮挡或伪装物"),
+    FACE_CONSENT_REQUIRED("FA-4010", HttpStatus.BAD_REQUEST, "未取得人脸采集单独同意"),
 
     // ---- 5xxx 申诉 ----
     APPEAL_EXISTS("FA-5001", HttpStatus.CONFLICT, "该记录已有待处理申诉"),

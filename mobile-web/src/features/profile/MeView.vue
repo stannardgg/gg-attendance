@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { showToast } from 'vant'
+import { showConfirmDialog, showToast } from 'vant'
 import { api, messageOf } from '@/shared/api/client'
 import { auth, logout, refreshFaceStatus } from '@/shared/store/auth'
 import { fmtTime } from '@/shared/utils'
@@ -68,6 +68,29 @@ function loadMore() {
 async function onLogout() {
   await logout()
   router.replace('/login')
+}
+
+/* ---------------- 删除人脸数据（CR-028 数据主体删除权）---------------- */
+
+async function deleteFaceData() {
+  try {
+    await showConfirmDialog({
+      title: '删除人脸数据',
+      message:
+        '将删除你的人脸向量与档案，并撤回采集同意。\n\n历史签到记录不受影响。\n删除后如需人脸签到，须重新同意并采集。\n\n该操作不可恢复。',
+      confirmButtonText: '确认删除',
+      cancelButtonText: '取消'
+    })
+  } catch {
+    return // 用户取消
+  }
+  try {
+    await api.post('/api/v1/mobile/face/data-deletion')
+    showToast('已删除人脸数据并撤回同意')
+    await refreshFaceStatus()
+  } catch (err) {
+    showToast(messageOf(err))
+  }
 }
 
 /* ---------------- 修改密码（CR-024）：提交申请 → 管理员审核 ---------------- */
@@ -176,6 +199,13 @@ onMounted(() => {
         is-link
         :label="auth.faceStatus?.rejectReason || ''"
         @click="router.push('/face/enroll')"
+      />
+      <van-cell
+        v-if="auth.faceStatus?.status && auth.faceStatus.status !== 'NONE'"
+        title="删除人脸数据"
+        is-link
+        label="删除向量与档案并撤回同意；历史签到记录不受影响"
+        @click="deleteFaceData"
       />
       <van-cell
         title="修改密码"

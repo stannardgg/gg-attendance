@@ -7,6 +7,34 @@
 
 ## [Unreleased]
 
+### Added
+- **主动活体真实-world 评测协议与脚本（验收闭环第一步）**：新增
+  `docs/verification/active-liveness-protocol.md`（ISO/IEC 30107-3 口径的
+  APCER/BPCER 定义、四类攻击通道分析、真机采集素材矩阵与落盘格式、验收线
+  与决策映射）与 `face-service-python/scripts/eval_active_liveness.py`
+  （`--proxy` 几何同构代理评测 / `--real` 真机落盘评测，完整生产判定链驱动，
+  打桩 java_client 与向量库）。代理评测 12 身份 × 188 场实测：MOVE_* 对
+  「照片物理平移」组件级 APCER=100%（几何同构原理性缺口）、TURN_* 对
+  「照片 3D 倾转」APCER=100%、「照片歪着拿 ±20° 内」与静态照片均 0%；
+  系统级全部被活体模型门禁拦截（APCER=0）。BPCER 与预录视频重放须真机
+  采集后 `--real` 复测（协议 §4/§5）。
+- **人脸「单独同意」v2、数据主体删除权与保留期限（CR-028，合规交付）**：
+  采集页移除勾选框，改为进入页面先展示《人脸信息采集与使用告知（v2）》全文
+  弹窗（点遮罩不关闭），点「同意并开始采集」→ 调用新端点
+  `POST /api/v1/mobile/face/consent` → 成功后才启动摄像头；不同意即退出且零落库。
+  同意事件落新表 `face_consent_record`（V10，只增不改），`account.face_consent_at/`
+  `version` 仅保留当前态；`POST /api/v1/mobile/face/enroll` 服务端强校验当前版本
+  ACCEPT 事件（缺失/版本不符 404 `FA-2001`，不再信任客户端自报）。删除权：
+  新端点 `POST /api/v1/mobile/face/data-deletion` 一键物理删除本人向量与档案并撤回
+  同意（任意档案状态可删，免审批；历史考勤记录不受影响），采集页新增删除按钮；
+  管理员归档学生同步物理清除人脸数据。保留期限：新增《数据处理说明（致业主）》
+  与同意书 v2（docs/compliance/），`audit_log`/`agent_*_log` 由新增
+  `LogRetentionJob` 按 365/180 天自动清理（可配）。契约：两个新端点 +
+  FaceStatus 增 `consentVersion`/`consentAt`；新错误码 **FA-4010**（400，未取得
+  人脸采集单独同意，四处契约同步，ContractTest 37→38）。「我的」页新增删除入口、
+  项目文档 §13.4 勾选框口径同步修订；FaceConsentIT 2 用例（同意-删除生命周期 /
+  归档清脸，学生走真实激活链路）。同意书占位符待业主填写（CR-028 §6）。
+
 ### Changed
 - **新建/编辑课程学期改为选择器**：学期字段从自由文本输入拆成「学年 + 上/下半年」
   两个下拉（学年区间为近 5 年至后 2 年，新建默认预填当前学期，可清空留空），

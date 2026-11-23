@@ -90,6 +90,10 @@ export interface FaceStatusDetail {
   submittedAt?: string | null
   reviewedAt?: string | null
   rejectReason?: string | null
+  /** 当前生效的同意书版本；撤回或删除人脸数据后为 null（CR-028） */
+  consentVersion?: string | null
+  /** 首次单独同意时间；撤回或删除人脸数据后为 null（CR-028） */
+  consentAt?: string | null
 }
 
 export interface Appeal {
