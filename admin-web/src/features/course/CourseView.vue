@@ -18,7 +18,9 @@ const dialog = reactive({ open: false, editing: null as CourseRow | null })
 const form = reactive({
   code: '',
   name: '',
-  semester: '',
+  // 学期拆成「学年 + 上/下半年」两个选择器，落库仍是规范格式 2026-2027-1（-1 上半年、-2 下半年）
+  semYear: undefined as number | undefined,
+  semHalf: undefined as 1 | 2 | undefined,
   ownerTeacherId: undefined as number | undefined,
   remark: ''
 })
@@ -32,6 +34,27 @@ function rowClass({ row }: { row: CourseRow }) {
   return row.id === highlightId.value ? 'hl' : ''
 }
 const title = computed(() => (dialog.editing ? '编辑课程' : '新建课程'))
+
+// ---- 学期选择器：学年（起始年）+ 上/下半年 ----
+// 取值口径与 Agent 归一化一致（planner._normalize_semester）：裸年份 = 学年起始年，-1 上半年、-2 下半年。
+const yearOptions = computed(() => {
+  const now = new Date().getFullYear()
+  const list: number[] = []
+  for (let y = now - 5; y <= now + 2; y++) list.push(y)
+  return list
+})
+const semesterPreview = computed(() =>
+  form.semYear && (form.semHalf === 1 || form.semHalf === 2)
+    ? `${form.semYear}-${form.semYear + 1}-${form.semHalf}`
+    : ''
+)
+// 编辑旧数据时学期可能是非规范自由文本：不选则保存时不动它（undefined = 后端不更新）
+const semesterLegacy = ref('')
+function defaultSemester(): { year: number; half: 1 | 2 } {
+  const now = new Date()
+  const autumn = now.getMonth() + 1 >= 8
+  return { year: autumn ? now.getFullYear() : now.getFullYear() - 1, half: autumn ? 1 : 2 }
+}
 
 async function load() {
   loading.value = true
@@ -65,20 +88,27 @@ async function loadTeachers() {
 
 function openCreate() {
   dialog.editing = null
-  Object.assign(form, { code: '', name: '', semester: '', ownerTeacherId: undefined, remark: '' })
+  const d = defaultSemester()
+  Object.assign(form, { code: '', name: '', semYear: d.year, semHalf: d.half, ownerTeacherId: undefined, remark: '' })
+  semesterLegacy.value = ''
   codeError.value = ''
   dialog.open = true
 }
 
 function openEdit(row: CourseRow) {
   dialog.editing = row
+  // 规范学期拆回选择器；非规范旧值保留原文，不选则不更新
+  const m = /^(\d{4})-(\d{4})-([12])$/.exec(row.semester ?? '')
+  const canonical = !!m && Number(m[2]) === Number(m[1]) + 1
   Object.assign(form, {
     code: row.code,
     name: row.name,
-    semester: row.semester ?? '',
+    semYear: canonical ? Number(m![1]) : undefined,
+    semHalf: canonical ? (Number(m![3]) as 1 | 2) : undefined,
     ownerTeacherId: row.ownerTeacherId,
     remark: row.remark ?? ''
   })
+  semesterLegacy.value = canonical ? '' : (row.semester ?? '')
   codeError.value = ''
   dialog.open = true
 }
@@ -111,7 +141,7 @@ async function save() {
     if (dialog.editing) {
       await api.put(`/api/v1/admin/courses/${dialog.editing.id}`, {
         name: form.name,
-        semester: form.semester || undefined,
+        semester: semesterPreview.value || undefined,
         ownerTeacherId: form.ownerTeacherId ?? null,
         remark: form.remark || undefined
       })
@@ -120,7 +150,7 @@ async function save() {
       const created = await api.post<CourseRow>('/api/v1/admin/courses', {
         code: form.code,
         name: form.name,
-        semester: form.semester || undefined,
+        semester: semesterPreview.value || undefined,
         ownerTeacherId: form.ownerTeacherId ?? undefined,
         remark: form.remark || undefined
       })
@@ -358,7 +388,19 @@ async function removeGrant(row: CourseGrantRow) {
           <el-input v-model="form.name" maxlength="120" />
         </el-form-item>
         <el-form-item label="学期">
-          <el-input v-model="form.semester" placeholder="2026-2027-1" />
+          <div class="sem-picker">
+            <el-select v-model="form.semYear" clearable placeholder="学年" style="flex: 1.3">
+              <el-option v-for="y in yearOptions" :key="y" :label="`${y}-${y + 1} 学年`" :value="y" />
+            </el-select>
+            <el-select v-model="form.semHalf" clearable placeholder="上半年 / 下半年" style="flex: 1">
+              <el-option label="上半年" :value="1" />
+              <el-option label="下半年" :value="2" />
+            </el-select>
+          </div>
+          <div v-if="semesterPreview" class="field-tip">将保存为：{{ semesterPreview }}（-1 上半年、-2 下半年）</div>
+          <div v-else-if="semesterLegacy" class="field-tip">
+            当前值「{{ semesterLegacy }}」不是标准学年格式；保持不选则不修改，重新选择后将覆盖。
+          </div>
         </el-form-item>
         <el-form-item v-if="isAdmin" label="开课教师">
           <el-select v-model="form.ownerTeacherId" clearable placeholder="可空" style="width: 100%">
@@ -450,6 +492,11 @@ async function removeGrant(row: CourseGrantRow) {
   color: #909399;
   line-height: 1.5;
   padding-top: 2px;
+}
+.sem-picker {
+  display: flex;
+  gap: 8px;
+  width: 100%;
 }
 .grant-picker {
   display: flex;
