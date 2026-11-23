@@ -11,13 +11,13 @@
 前提下区分「浓妆」与「深肤色/阴影」。只有整脸涂装/面具这类让活体与
 识别同时失效的极端遮挡才属于拦截范围（由口罩分支兜住）。
 
-★ 阈值全部来自 2026-11-22 五轮 CASIA 标定实验（40 身份，JPEG q90 传输
-链路），勿凭感觉调。标定结论摘要（详见 docs/change-request/CR-025）：
-
-  口罩：下半脸必盖区肤色占比——干净脸 min 0.113，浅色织物 90% ≤ 0.10；
-        嘴区灰度 std——干净脸 min 30.0，均质色块 ≤ 22。棕色织物口罩
-        是已知盲区（棕=暗橙=肤色同色度，Cr/Cb 落在肤色区间且织物有
-        纹理），由匹配门禁兜底。
+★ 阈值与通道语义：
+  口罩：下半脸必盖区肤色占比（_skin_ratio，Cr∈[125,180] + Cb∈[70,135]，
+        区间挂接已按 cv2 [Y,Cr,Cb] 顺序修正，见该函数 docstring 的事故记录）。
+        修正前的「干净脸 min 0.113 / 织物 90% ≤ 0.10」是低饱和 CASIA 数据与
+        装反区间的巧合产物，已作废；修正后阈值 0.10 保留——物理含义重新
+        成立：布料占满必盖区 → 区间外像素占比 ≈1 → 得分 ≈0。
+        中性灰白织物（Cr≈Cb≈128）是盲区，由匹配门禁兜底。
   墨镜：眼框 std ≤ 15 且 相对亮度 ≤ 0.50——干净眼框 std ≥ 27.2、
         rel ≥ 0.72；纹理镜面 ≤ 13.7 / ≤ 0.21。「均匀 + 暗」双条件
         缺一不可：闭眼时眼睑 std 也低（代理最高 19.4）但它是皮肤色
@@ -87,13 +87,93 @@ def mask_region(eye_rect: list[int], mouth_rect: tuple[int, int, int, int]
 
 
 def _skin_ratio(ycc_roi: np.ndarray) -> float:
-    """YCrCb 肤色占比。区间是文献常用值，标定实验里干净下半脸全部落在
-    区间内（占比 ≥ 0.113）、织物口罩全部落在区间外——区间本身不敏化，
-    判据的区分力来自「必盖区被布料占据」这个物理事实。"""
-    skin = ((ycc_roi[:, :, 0] > 50) & (ycc_roi[:, :, 1] >= 70)
-            & (ycc_roi[:, :, 1] <= 135) & (ycc_roi[:, :, 2] >= 125)
-            & (ycc_roi[:, :, 2] <= 180))
+    """YCrCb 肤色占比。区间是文献常用值。
+
+    ★★ 通道语义（2026-11-23 真机误报事故后钉死，勿再改回）：
+    cv2.COLOR_BGR2YCrCb 输出顺序是 **[Y, Cr, Cb]**（纯红像素 idx1=255/Cr 饱和、
+    纯蓝像素 idx2=255/Cb 饱和，实测钉死）。肤色区间必须挂：
+      Cr（idx1）∈ [125, 180]  ← 红色度，真机肤色 ≈156
+      Cb（idx2）∈ [70, 135]   ← 蓝色度，真机肤色 ≈105
+    原实现把区间挂反了（idx1 套了 Cb 区间、idx2 套了 Cr 区间）：正常肤色
+    Cr≈156 落在 [70,135] 之外、Cb≈105 落在 [125,180] 之外 → 占比≈0 →
+    所有真机干净脸都被误判为「口罩」（FA-4009）。CASIA 标定没炸是因为
+    该数据集人脸低饱和（实测 Cr 126~132 / Cb 122~132，双双贴着 128 徘徊），
+    装反的区间恰好放进来一部分——「干净脸 min 0.113」是低饱和数据与双反
+    判据的脆弱巧合，真机上必炸（2026-11-23 sid=236 实测占比 0.006~0.015）。
+
+    已知盲区（修正前后同样存在）：中性灰白织物（真实口罩 Cr≈Cb≈128）双区间
+    全落内，判据只拦**彩色**织物（蓝绿口罩 Cb>135、红粉织物 Cr>180）。
+    白口罩由匹配门禁兜底，此判据不做白色检测。"""
+    skin = ((ycc_roi[:, :, 0] > 50) & (ycc_roi[:, :, 1] >= 125)
+            & (ycc_roi[:, :, 1] <= 180) & (ycc_roi[:, :, 2] >= 70)
+            & (ycc_roi[:, :, 2] <= 135))
     return float(skin.sum() / max(1, skin.size))
+
+
+def diagnose(aligned_bgr: np.ndarray, eye_rect: list[int],
+             mouth_rect: tuple[int, int, int, int]) -> dict | None:
+    """误报取证（仅在判据命中时调用）：一次误报日志要能同时回答三类假设。
+
+      ① 光照全局偏移（暗光/色温把肤色挤出 YCrCb 区间）→ meanY/Cb/Cr 与
+         skinRelaxed（放宽区间后占比是否回升）；
+      ② 局部遮挡/阴影（胡须、下巴阴影只压低必盖区中心）→ centerSkin 与
+         sideSkin 分带对比 + foreheadSkin 全脸参照；
+      ③ 真遮挡（口罩/围巾占满必盖区）→ strict 与 relaxed 同低。
+
+    与 evaluate 同一套区域闸（region_ok / 尺寸下限），区域不可得返回 None。
+    只读统计，不影响判定路径。标定纪律：本函数只采集证据，不改阈值。
+    """
+    if not (mouth_rect and eye_rect):
+        return None
+    er_bot = max(eye_rect[3], eye_rect[7])
+    if mouth_rect[1] < er_bot - 2:
+        return None
+    x1, y1, x2, y2 = mask_region(eye_rect, mouth_rect)
+    x1, y1 = max(0, x1), max(0, y1)
+    x2, y2 = min(192, x2), min(192, y2)
+    if x2 - x1 < 8 or y2 - y1 < 8:
+        return None
+    ycc = cv2.cvtColor(aligned_bgr, cv2.COLOR_BGR2YCrCb)
+    roi = ycc[y1:y2, x1:x2]
+    y_ch, cr, cb = roi[..., 0], roi[..., 1], roi[..., 2]
+
+    def ratio(mask: np.ndarray) -> float:
+        return round(float(mask.sum()) / max(1, mask.size), 4)
+
+    # cv2 YCrCb 顺序 = [Y, Cr, Cb]（见 _skin_ratio 的事故记录）；区间同源。
+    strict = ((y_ch > 50) & (cr >= 125) & (cr <= 180) & (cb >= 70) & (cb <= 135))
+    relaxed = ((y_ch > 35) & (cr >= 115) & (cr <= 190) & (cb >= 60) & (cb <= 145))
+    # 分带：嘴框内（中心） vs 两侧脸颊条（必盖区 x 范围减去嘴框）。
+    mx1, my1, mx2, my2 = mouth_rect
+    mx1, mx2 = max(x1, mx1), min(x2, mx2)
+    center = roi[:, mx1 - x1:mx2 - x1]
+    left = roi[:, :max(0, mx1 - x1)]
+    right = roi[:, max(0, mx2 - x1):]
+    def band_skin(seg: np.ndarray) -> float:
+        if seg.size == 0:
+            return 0.0
+        return ratio(((seg[..., 0] > 50) & (seg[..., 1] >= 125) & (seg[..., 1] <= 180)
+                      & (seg[..., 2] >= 70) & (seg[..., 2] <= 135)))
+    ey_top = int(min(eye_rect[1], eye_rect[5]))
+    fore = ycc[int(192 * 0.10):max(int(192 * 0.10) + 4, ey_top),
+               int(192 * 0.22):int(192 * 0.78)]
+    return {
+        "region": [x1, y1, x2, y2],
+        "meanY": round(float(y_ch.mean()), 1),
+        "meanCr": round(float(cr.mean()), 1),
+        "meanCb": round(float(cb.mean()), 1),
+        "skinStrict": ratio(strict),
+        "skinRelaxed": ratio(relaxed),
+        "pctNearBlack": ratio(y_ch < 20),
+        "pctYle50": ratio(y_ch <= 50), "pctCblt70": ratio(cb < 70),
+        "pctCbgt135": ratio(cb > 135), "pctCrlt125": ratio(cr < 125),
+        "pctCrgt180": ratio(cr > 180),
+        "centerSkin": band_skin(center),
+        "sideSkin": band_skin(left) if right.size == 0 else round(
+            (band_skin(left) * left.size + band_skin(right) * right.size)
+            / max(1, left.size + right.size), 4),
+        "foreheadSkin": band_skin(fore) if fore.size else None,
+    }
 
 
 def evaluate(aligned_bgr: np.ndarray, eye_rect: list[int],
