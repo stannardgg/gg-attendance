@@ -18,10 +18,13 @@ import random
 import cv2
 import numpy as np
 
-from app.challenge import gates
+from app.challenge import gates, passive
 from app.challenge.action import (
     dark_ratio, eye_dark_ratio, face_scale, interocular, roll_proxy, yaw_proxy,
 )
+from app.challenge.disguise import advice as disguise_advice
+from app.challenge.disguise import kind_text as disguise_kind_text
+from app.challenge import disguise as _disguise
 from app.challenge.store import (
     BASELINE_FREE_ACTIONS, EYE_ACTIONS, SCALE_ACTIONS, TURN_ACTIONS,
     TURN_DIRECTIONS, ChallengeState, ChallengeStore,
@@ -138,6 +141,18 @@ class ChallengeService:
                 eye_roi = boxes
             except ValueError:
                 eye_roi = None
+
+            # CR-025：基线帧遮挡评估。戴着口罩/墨镜/帽子开挑战会在 start 就
+            # 被拒（FA-4009 + 摘除指令），不消耗重试次数——学生还没做任何
+            # 动作，此时拒绝不是「失败」而是「没开始」。区域缺失（关键点失败）
+            # 时跳过评估：基线统计不可信的场景交给后续帧与门禁兜底。
+            if (settings.disguise.enabled and crop is not None
+                    and roi is not None and eye_roi):
+                _crits = _disguise.evaluate(crop, eye_roi, tuple(roi))
+                _found = _disguise.hits(_crits)
+                if _found:
+                    raise DisguiseError(
+                        f"检测到面部遮挡（{disguise_kind_text(_found)}），{disguise_advice(_found)}")
 
         # 动作必须在基线之后选：所有动作的判据都是"相对基线的变化"，
         # 而且还要看这张脸此刻有没有做这个动作的余地（见 _action_eligible）。
@@ -326,14 +341,67 @@ class ChallengeService:
             except ValueError:
                 st.eye_roi = []
 
-        emb = embedder().embedding(frame_bgr, face.kps)
-        if not st.first_emb:
-            st.first_emb = emb.tolist()
-        st.last_emb = emb.tolist()
+        # CR-025：逐帧遮挡评估（对齐 crop 已算好，判据 <1ms，零模型调用）。
+        # 连续 ≥3 帧命中 → 当场中止（FA-4009 + 摘除指令 + CR-023 计一次失败），
+        # 与 multi_face/no_face 中止路径同构；未达中止阈值时 hint 提示摘除
+        # （覆盖动作提示——戴着口罩数动作次数没有意义，先摘口罩）。
+        # 区域未锁定（基线降级且本帧也没锁上）时跳过：统计区不可信，交给
+        # finish 的占比门禁兜底。
+        occl_hint: str | None = None
+        if (settings.disguise.enabled and st.roi_x1 >= 0 and st.eye_roi):
+            _crits = _disguise.evaluate(
+                aligned, st.eye_roi, (st.roi_x1, st.roi_y1, st.roi_x2, st.roi_y2))
+            _found = _disguise.hits(_crits)
+            if _found:
+                st.occl_total += 1
+                st.occl_run += 1
+                for _k in _found:
+                    if _k not in st.occl_kinds:
+                        st.occl_kinds.append(_k)
+                if st.occl_run >= settings.disguise.occl_frames:
+                    st.closed = True
+                    st.seq += 1            # 帧已消费，推进 seq（与 multi_face 同构）
+                    self.store.save(st)
+                    self._record_failure(st, "disguise")
+                    raise DisguiseError(
+                        f"检测到面部遮挡（{disguise_kind_text(st.occl_kinds)}），"
+                        f"{disguise_advice(st.occl_kinds)}")
+                occl_hint = disguise_advice(_found)
+            else:
+                st.occl_run = 0
+
+        # 隔帧 ArcFace（2026-11-22 恢复 hold=2 的第二个前置优化）：embedding
+        # ~260ms/次，隔帧后单帧均值 ~300ms，服务端消化率 ~3fps，「保持约 1 秒」
+        # 的动作能落 2~3 帧，hold=2 的时序可达性成立。身份门禁用首末帧、1:N
+        # 用末帧（或转头最正脸帧），都不要求逐帧特征；特征最多滞后一帧
+        # （~300ms），「中途换人」检测粒度 0.3s → 0.6s，相对 800ms 时代仍是提升。
+        # 转头动作例外：逐帧跑——frontal_emb 要在每帧上找「离基线偏航最近」的
+        # 特征，隔帧会漏掉最正脸那一帧，1:N 相似度直接受损。
+        emb = None
+        if st.seq % 2 == 0 or st.action in TURN_ACTIONS:
+            emb = embedder().embedding(frame_bgr, face.kps)
+        if emb is not None:
+            if not st.first_emb:
+                st.first_emb = emb.tolist()
+            st.last_emb = emb.tolist()
 
         p = liveness().live_probability(frame_bgr, face.bbox)
         if p is not None:
             st.live_probs.append(p)
+
+        # 被动活体线索逐帧记录（无模型，~2ms）。无论 PASSIVE_GATE 开关与否都记：
+        # finish 全量落日志，生产流量免费积累真实标定语料（见 passive.py 的
+        # 标定状态说明）。特征在检测框原生分辨率上算，不做任何缩放。
+        px1, py1, px2, py2 = (max(0, int(v)) for v in face.bbox)
+        fcrop = frame_bgr[py1:py2, px1:px2]
+        if fcrop.size:
+            prom, hfr = passive.spectral_prominence(
+                cv2.cvtColor(fcrop, cv2.COLOR_BGR2GRAY))
+        else:
+            prom, hfr = 0.0, 0.0
+        st.passive_peak.append(prom)
+        st.passive_hf.append(hfr)
+        st.passive_clip.append(passive.clip_ratio(frame_bgr))
 
         st.ratios.append(ratio)
         st.scales.append(face_scale(face, frame_bgr.shape[1]))
@@ -348,14 +416,18 @@ class ChallengeService:
             yaw = yaw_proxy(face)
             st.yaws.append(yaw)
             # 记下"离基线偏航最近"的那一帧特征：末帧可能是侧脸，拿它做 1:N 会自伤。
-            dev = abs(yaw - st.baseline_yaw)
-            if dev < st.frontal_dev:
-                st.frontal_dev = dev
-                st.frontal_emb = emb.tolist()
+            # 转头逐帧跑 ArcFace（见上方隔帧说明），emb 恒非 None。
+            if emb is not None:
+                dev = abs(yaw - st.baseline_yaw)
+                if dev < st.frontal_dev:
+                    st.frontal_dev = dev
+                    st.frontal_emb = emb.tolist()
         st.seq += 1
         self.store.save(st)
 
-        return self._frame_resp(st, accepted=True, hint=self._hint(st))
+        # 遮挡提示优先于动作提示：戴着口罩时先摘口罩，动作提示没有意义
+        hint = occl_hint if occl_hint else self._hint(st)
+        return self._frame_resp(st, accepted=True, hint=hint)
 
     # ---------------- finish ----------------
     def finish(self, challenge_id: str) -> dict:
@@ -379,7 +451,23 @@ class ChallengeService:
         l_g = gates.gate_liveness(st)
         i_g = gates.gate_identity(st)
         a_g, detected, required = gates.gate_action(st)
-        all_gates = {"liveness": l_g, "identity": i_g, "actionCount": a_g}
+        p_g = gates.gate_passive(st)
+        d_g = gates.gate_disguise(st)
+        # disguise 排最前：戴着口罩时 liveness/match 的失败都是它的下游症状，
+        # 归因要从最外因开始（CR-025）。
+        all_gates = {"disguise": d_g, "liveness": l_g, "identity": i_g,
+                     "actionCount": a_g, "passive": p_g}
+        # 被动线索语料行（无论门禁开关）：真实标定就靠生产流量里的这些浮点数
+        if st.passive_peak:
+            n = max(1, settings.gates.passive_samples)
+            logger.info(
+                "passive features cid=%s n=%d prom_med=%.2f hf_med=%.3f clip_med=%.3f prom_max=%.2f",
+                challenge_id, len(st.passive_peak),
+                float(np.median(st.passive_peak[-n:])),
+                float(np.median(st.passive_hf[-n:])) if st.passive_hf else 0.0,
+                float(np.median(st.passive_clip[-n:])) if st.passive_clip else 0.0,
+                float(max(st.passive_peak)),
+            )
 
         sid, sim, top2 = index().search_top2(np.array(st.last_emb))
         margin = settings.match.margin_threshold
@@ -392,11 +480,11 @@ class ChallengeService:
         m_g = gates.GateResult(match_pass, sim, settings.match.pass_threshold)
         all_gates["match"] = m_g
 
-        passed = l_g.passed and i_g.passed and a_g.passed and m_g.passed
+        passed = d_g.passed and l_g.passed and i_g.passed and a_g.passed and p_g.passed and m_g.passed
         reject = None
         if not passed:
-            for name, g in (("liveness", l_g), ("identity", i_g),
-                            ("actionCount", a_g), ("match", m_g)):
+            for name, g in (("disguise", d_g), ("liveness", l_g), ("identity", i_g),
+                            ("actionCount", a_g), ("passive", p_g), ("match", m_g)):
                 if not g.passed:
                     reject = name
                     break
@@ -534,6 +622,15 @@ class TooManyFaces(RuntimeError):
 
 class NoFace(RuntimeError):
     """连续多帧无脸 → 中止（FA-4001）。"""
+
+
+class DisguiseError(RuntimeError):
+    """检测到面部遮挡/伪装物（CR-025）→ 400 FA-4009。
+
+    start 基线命中：还没开始做动作，拒绝不消耗重试次数；
+    frame 连续命中：当场中止并计一次失败（与 multi_face/no_face 同构）。
+    消息里带种类与摘除指令（「检测到面部遮挡（口罩），请摘下口罩」）。
+    """
 
 
 class RetryExceeded(RuntimeError):

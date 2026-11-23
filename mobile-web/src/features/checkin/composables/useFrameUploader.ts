@@ -295,6 +295,8 @@ export function useFrameUploader(opts: Options) {
         return 'FA-4002'
       case 'no_face':
         return 'FA-4001'
+      case 'disguise':
+        return 'FA-4009'
       default:
         return 'FA-4005'
     }
