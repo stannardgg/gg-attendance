@@ -251,6 +251,80 @@ def test_create_session_reports_missing_object(patch_graph, fake_tools, user, mo
     assert "未存在" in out["answer"]
 
 
+def test_create_course_free_text_reaches_preview(patch_graph, fake_tools, user):
+    """业主 2026-11-23 反馈：「新建课程 AABB 名称：离散数学，学期2022」。
+
+    旧行为：router 认出 action，planner 却没有对应分支，掉进
+    「这个操作需要先指定具体对象」的兜底文案——建课等于没实现。
+    裸年份学期归一化为 2022-2023-1，确认卡上看得见，认错点一次取消。
+    """
+    fake_tools.responses["create_course"] = {
+        "requiresConfirm": True, "confirmToken": "tk-4", "expiresAt": "2099-01-01T00:00:00",
+        "preview": {"actionLabel": "新建课程", "affectedCount": 1, "undoable": True},
+    }
+    out = _session(user).ask("新建课程 AABB 名称：离散数学，学期2022")
+
+    assert fake_tools.calls[0]["tool"] == "create_course"
+    params = fake_tools.calls[0]["params"]
+    assert params["code"] == "AABB"
+    assert params["name"] == "离散数学"
+    assert params["semester"] == "2022-2023-1"
+    assert out["pending"]["preview"]["actionLabel"] == "新建课程"
+
+
+def test_create_class_free_text_reaches_preview(patch_graph, fake_tools, user):
+    """班级同理：标签字段（名称/年级/专业）各归各位，名称里的空格不丢。"""
+    fake_tools.responses["create_class"] = {
+        "requiresConfirm": True, "confirmToken": "tk-5", "expiresAt": "2099-01-01T00:00:00",
+        "preview": {"actionLabel": "新建班级", "affectedCount": 1, "undoable": True},
+    }
+    _session(user).ask("新建班级 CS2401 名称：计算机 1 班，年级2024级，专业软件工程")
+
+    params = fake_tools.calls[0]["params"]
+    assert fake_tools.calls[0]["tool"] == "create_class"
+    assert params["code"] == "CS2401"
+    assert params["name"] == "计算机 1 班"
+    assert params["grade"] == "2024级"
+    assert params["major"] == "软件工程"
+
+
+def test_create_course_missing_code_asks_with_example(patch_graph, fake_tools, user):
+    """编码解析不出来就反问给例句，绝不猜一个编码建错课。"""
+    out = _session(user).ask("新建课程 名称：离散数学")
+
+    assert fake_tools.calls == []
+    assert "编码" in out["answer"]
+    assert "AABB" in out["answer"]
+
+
+def test_create_course_bad_semester_asks_not_fails_later(patch_graph, fake_tools, user):
+    """学期归一不出合法格式就当面反问——确认完的卡不能死在参数校验上。"""
+    out = _session(user).ask("新建课程 AABB 名称：离散数学，学期去年")
+
+    assert fake_tools.calls == []
+    assert "2026-2027-1" in out["answer"]
+
+
+def test_create_question_does_not_open_confirm_card(patch_graph, fake_tools, user):
+    """「为什么要新建课程」是问句，不该弹出新建确认卡。"""
+    out = _session(user).ask("为什么要新建课程")
+
+    assert fake_tools.calls == []
+    assert out["pending"] is None
+
+
+def test_create_entity_semester_normalization():
+    from app.graph.nodes.planner import _normalize_semester
+
+    assert _normalize_semester("2022") == "2022-2023-1"
+    assert _normalize_semester("2022-2023") == "2022-2023-1"
+    assert _normalize_semester("2022~2023") == "2022-2023-1"
+    assert _normalize_semester("2022-2023-2") == "2022-2023-2"
+    # 学年不连续不是合法学期
+    assert _normalize_semester("2021-2023") is None
+    assert _normalize_semester("去年") is None
+
+
 def test_generic_class_rate_is_not_parsed_as_class_name(patch_graph, fake_tools, user):
     """「本周各班出勤率」里的「本周各」不是班名。
 
