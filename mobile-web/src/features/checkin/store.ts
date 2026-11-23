@@ -73,6 +73,22 @@ export function restoreJoin(): boolean {
   }
 }
 
+/**
+ * 票据过期清场前抢出 sid：采集页刷新（手滑/后台恢复）后要带 sid 回入口页，
+ * 入口页重新 join——未达上限就换新票续采，已达上限则当场显示 FA-3005 文案
+ * 与申诉入口，而不是把学生丢回一个没有上下文的场次列表。
+ */
+export function peekJoinSid(): number | null {
+  try {
+    const raw = sessionStorage.getItem(KEY)
+    if (!raw) return null
+    const sid = (JSON.parse(raw) as JoinState).sid
+    return sid && sid > 0 ? sid : null
+  } catch {
+    return null
+  }
+}
+
 export function clearJoin() {
   Object.assign(checkin, {
     sid: null,

@@ -7,6 +7,27 @@
 
 ## [Unreleased]
 
+### Added
+- **登录状态 cookie 持久化 + 静默续期（业主验收）**：移动端与管理端的
+  accessToken/refreshToken 从 localStorage 迁移到 cookie（`gg.mobile.token`/
+  `gg.mobile.refresh`、`gg.admin.token`/`gg.admin.refresh`，SameSite=Lax，
+  access 寿命取登录响应 `expiresIn`，refresh 7 天对齐 JWT_REFRESH_TTL）。
+  刷新页面后仍是当前用户：仅 access 过期时路由守卫放行并由 loadMe 用
+  refresh cookie 调 `/auth/refresh` 静默换新（单飞防并发——refresh 为轮换
+  语义，复用旧令牌会被作废）；401 续期后自动重试原请求一次，换新失败才清态
+  回登录页。改密后 refresh 失效的行为与既有 credential_version 机制一致。
+
+### Changed
+- **FA-3005 文案统一为业主验收口径「超过三次识别失败，联系管理员」**：
+  ErrorCode 枚举、契约 error-codes.json、两份 errors.ts、Python
+  RetryExceeded 处理器（不再透传 service 层拼串）、join 处去掉 message
+  覆盖，join/start/active 三个入口同句；签到入口、首页的锁死 toast 与
+  结果面板锁死文案同步更新。
+- **采集页刷新带 sid 回入口页**：票据（60s）过期不再丢上下文——
+  `peekJoinSid()` 从 sessionStorage 抢出 sid 后回 `/checkin?sid=X` 重新
+  join：未达上限续票进采集，已锁死当场显示 FA-3005 文案与申诉入口；
+  锁死状态权威计数在 `checkin_attempt` 表，刷新多少次结果一致。
+
 ## [1.5.0] - 2026-11-23
 
 ### Added

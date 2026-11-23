@@ -28,13 +28,114 @@ export class ApiError extends Error {
 }
 
 export const TOKEN_KEY = 'gg.mobile.token'
+/** 刷新令牌独立成 cookie：access 过期后靠它静默续期（后端 /auth/refresh 轮换） */
+export const REFRESH_KEY = 'gg.mobile.refresh'
+
+/**
+ * 登录态落在 **cookie** 而不是 localStorage：这是业主验收的明确口径
+ * （「存储登录状态 cookie，刷新后仍然是当前用户」）。令牌本身仍走
+ * Authorization 头上行，cookie 只充当持久化介质，服务端不读它。
+ * SameSite=Lax：本站的 fetch 都属同站请求，不受影响；JS 可读性与
+ * localStorage 相当，威胁模型没有变化。
+ */
+const ACCESS_MAX_AGE = 1800 // 对齐后端 JWT_ACCESS_TTL 默认值；登录/刷新会用响应里的 expiresIn 覆盖
+const REFRESH_MAX_AGE = 604800 // 对齐后端 JWT_REFRESH_TTL（7 天）
+
+function readCookie(name: string): string | null {
+  const prefix = `${name}=`
+  const hit = document.cookie.split('; ').find((c) => c.startsWith(prefix))
+  return hit ? decodeURIComponent(hit.slice(prefix.length)) : null
+}
+
+function writeCookie(name: string, value: string, maxAge: number) {
+  document.cookie = `${name}=${encodeURIComponent(value)}; path=/; max-age=${maxAge}; SameSite=Lax`
+}
+
+function readToken(name: string): string | null {
+  try {
+    return readCookie(name)
+  } catch {
+    return null
+  }
+}
+
+function writeToken(name: string, token: string | null, maxAge: number) {
+  try {
+    if (token) writeCookie(name, token, maxAge)
+    else writeCookie(name, '', 0)
+  } catch {
+    /* 隐私模式下写不进去：本次会话退化为内存态，可用性优先 */
+  }
+}
 
 export function getToken(): string | null {
-  return localStorage.getItem(TOKEN_KEY)
+  return readToken(TOKEN_KEY)
 }
-export function setToken(token: string | null) {
-  if (token) localStorage.setItem(TOKEN_KEY, token)
-  else localStorage.removeItem(TOKEN_KEY)
+
+export function setToken(token: string | null, maxAgeSec?: number) {
+  writeToken(TOKEN_KEY, token, maxAgeSec ?? ACCESS_MAX_AGE)
+}
+
+export function getRefreshToken(): string | null {
+  return readToken(REFRESH_KEY)
+}
+
+export function setRefreshToken(token: string | null) {
+  writeToken(REFRESH_KEY, token, REFRESH_MAX_AGE)
+}
+
+/** 登录失效（刷新失败/登出/401 终态）时两把钥匙一起清 */
+export function clearTokens() {
+  setToken(null)
+  setRefreshToken(null)
+}
+
+/* ---------------- 静默续期 ---------------- */
+
+let refreshing: Promise<string | null> | null = null
+
+/**
+ * 单飞刷新：并发多个 401 只发起一次 /auth/refresh。
+ * 后端 refresh 是**轮换**语义（旧 refresh 立即作废），并发复用旧令牌会互相打掉。
+ */
+export function refreshAccessToken(): Promise<string | null> {
+  if (!refreshing) {
+    refreshing = doRefresh().finally(() => {
+      refreshing = null
+    })
+  }
+  return refreshing
+}
+
+async function doRefresh(): Promise<string | null> {
+  const rt = getRefreshToken()
+  if (!rt) return null
+  let resp: Response
+  try {
+    resp = await fetch(`${BASE}/api/v1/auth/refresh`, {
+      method: 'POST',
+      headers: { Accept: 'application/json', 'Content-Type': 'application/json' },
+      body: JSON.stringify({ refreshToken: rt })
+    })
+  } catch {
+    // 网络抖动不算登录失效：cookie 原样保留，下一次请求再试
+    return null
+  }
+  let payload: any
+  try {
+    payload = await resp.json()
+  } catch {
+    clearTokens()
+    return null
+  }
+  if (resp.status !== 200 || payload?.code !== 'FA-0000' || !payload?.data?.accessToken) {
+    // refresh 也失效（过期/改密后作废）：登录态到此为止，两把钥匙一起清
+    clearTokens()
+    return null
+  }
+  setToken(payload.data.accessToken, payload.data.expiresIn)
+  setRefreshToken(payload.data.refreshToken)
+  return payload.data.accessToken as string
 }
 
 type Options = {
@@ -45,6 +146,8 @@ type Options = {
   face?: boolean
   /** true = 原始 Response（下载场景），这里用不到但保持接口一致 */
   raw?: boolean
+  /** 内部标记：401 续期后已重试过一次，防止换出的新令牌仍 401 时无限循环 */
+  retried?: boolean
 }
 
 function buildUrl(path: string, query?: Record<string, unknown>): string {
@@ -82,7 +185,13 @@ export async function request<T>(path: string, options: Options = {}): Promise<T
   }
 
   if (resp.status === 401) {
-    setToken(null)
+    // access 过期是常态而不是异常：先用 refresh cookie 静默续期并重试一次，
+    // 换不出来（refresh 也失效/网络断且无可用令牌）才清态回登录页。
+    if (!options.retried) {
+      const fresh = await refreshAccessToken()
+      if (fresh) return request<T>(path, { ...options, retried: true })
+    }
+    clearTokens()
     window.dispatchEvent(new CustomEvent('gg:unauthorized'))
     throw new ApiError('FA-1002', ERROR_MESSAGES['FA-1002'], 401)
   }

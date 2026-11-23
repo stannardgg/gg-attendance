@@ -81,8 +81,9 @@ function enter(s: ActiveSession) {
   }
   // 识别失败已达上限（CR-023）：join 会以 FA-3005 拒绝，别再送学生进采集页。
   // 与首页同策略：点这里直接去申诉——锁死之后唯一有意义的动作。
+  // 文案按业主验收口径：「超过三次识别失败，联系管理员」。
   if ((s.retryLeft ?? 3) <= 0) {
-    showToast({ message: '识别失败次数已达上限，请提交申诉让老师核对', duration: 2200 })
+    showToast({ message: '超过三次识别失败，联系管理员', duration: 2200 })
     router.push(`/appeal/${s.sessionId}`)
     return
   }

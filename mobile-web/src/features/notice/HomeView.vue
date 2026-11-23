@@ -55,7 +55,8 @@ function go(s: ActiveSession) {
   // 首页不能还把学生往采集页送。此时该场次唯一有意义的动作是申诉，
   // 所以点击直接带去申诉页——不是「禁入」，是换一条唯一的正路。
   if ((s.retryLeft ?? 3) <= 0) {
-    showToast({ message: '识别失败次数已达上限，请提交申诉让老师核对', duration: 2200 })
+    // 业主验收口径文案；点击仍带去申诉页——锁死后唯一有意义的动作
+    showToast({ message: '超过三次识别失败，联系管理员', duration: 2200 })
     router.push(`/appeal/${s.sessionId}`)
     return
   }

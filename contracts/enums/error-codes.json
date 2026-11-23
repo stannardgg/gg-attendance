@@ -44,7 +44,7 @@
     { "code": "FA-3002", "http": 400, "domain": "签到", "message": "二维码已失效，请重新扫码", "note": "【已停用·CR-013】二维码入口取消后服务端不再返回此码；编号冻结不复用，避免历史日志失去含义" },
     { "code": "FA-3003", "http": 409, "domain": "签到", "message": "你已完成签到，无需重复", "note": "由 uk_att_session_student 的 DuplicateKeyException 转换而来（§9.3）" },
     { "code": "FA-3004", "http": 403, "domain": "签到", "message": "你不在本次签到的班级中" },
-    { "code": "FA-3005", "http": 429, "domain": "签到", "message": "重试次数过多，请稍后再试或提交申诉", "note": "每会话每人 3 次（MAX_RETRY_PER_SESSION）" },
+    { "code": "FA-3005", "http": 429, "domain": "签到", "message": "超过三次识别失败，联系管理员", "note": "每会话每人 3 次（MAX_RETRY_PER_SESSION）；文案为业主验收口径，刷新后锁死态页面原样可见" },
 
     { "code": "FA-4001", "http": 400, "domain": "人脸", "message": "未检测到人脸", "note": "连续 3 帧无脸才判，单帧不判（§10.2）" },
     { "code": "FA-4002", "http": 400, "domain": "人脸", "message": "只能留下一个人进行签到", "note": "仅计宽度 ≥ MULTI_FACE_MIN_PX(90px) 的脸，连续 3 帧才触发（§4.5）" },
