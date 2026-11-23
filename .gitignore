@@ -60,6 +60,8 @@ face-service-python/vectors.json
 # 演示版（独立域名 scan-checkin-77609）与业主截图，不属于本仓库代码基线
 workbuddy-checkin/
 效果图/
+# 文档生成流水线临时工作目录（doc-writer/doc-formatter 中间产物）
+output/
 # WorkBuddy 工作区文件
 *.genie
 .wbapp_*.genie
