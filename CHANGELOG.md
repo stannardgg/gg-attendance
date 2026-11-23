@@ -7,6 +7,8 @@
 
 ## [Unreleased]
 
+## [1.5.0] - 2026-11-23
+
 ### Added
 - **主动活体真实-world 评测协议与脚本（验收闭环第一步）**：新增
   `docs/verification/active-liveness-protocol.md`（ISO/IEC 30107-3 口径的
