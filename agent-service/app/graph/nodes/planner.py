@@ -11,7 +11,7 @@ import datetime as dt
 import logging
 import re
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from app.config import settings
@@ -37,6 +37,28 @@ _CREATE_NOUN = re.compile(r"(签到|打卡)")
 _NOT_CREATE = re.compile(r"(结束|关闭|收尾|停止|补签|请假|免签|申诉|改名|重命名|归档|停用|导入|删除|移除)")
 
 _RENAME = re.compile(r"(?:把|将)?(?P<old>.+?)(?:改名为|改名成|改名叫|重命名为|名称改成|名字改成)(?P<new>.+)$")
+
+# 新建班级/课程（L2 create_class / create_course）。router 的 _ACTION 认得出
+# 「新建课程」，但 planner 此前没有对应分支，句子全部掉进"需要指定具体对象"的
+# 兜底文案——业主 2026-11-23 反馈「新建课程 AABB 名称：离散数学，学期2022」建不了课。
+# 词面放宽到裸「建/加」，router 没认出的（如「建课程 离散数学」走 query 意图）也接得住。
+_CREATE_ENTITY = re.compile(r"(?:新建|创建|建|加)\s*一?[个门]?\s*(?:新)?\s*(班级|课程)")
+# 问句不是建课指令：「为什么要新建课程」不该弹出确认卡。
+_CREATE_QUESTION = re.compile(r"(为什么|怎么|如何|什么|吗[？?！!。]?\s*$|[？?]\s*$)")
+_CREATE_FIELD_CODE = re.compile(
+    r"(?:编码|代码|课程码|班级码|code)\s*[:：]?\s*([A-Za-z0-9]{2,32})", re.IGNORECASE)
+# 名称里允许空格（「计算机 1 班」），顿号也留给名称本体；结构性标点才是边界。
+_CREATE_FIELD_NAME = re.compile(
+    r"(?:名称|名字|name)\s*[:：]?\s*([^\n，。,；；！!？?【】《》]{1,60})", re.IGNORECASE)
+_CREATE_FIELD_SEMESTER = re.compile(
+    r"学期\s*[:：]?\s*(\d{4}\s*(?:[-—~至]\s*\d{4})?\s*(?:[-—~至]\s*[12])?)")
+_CREATE_FIELD_GRADE = re.compile(r"年级\s*[:：]?\s*([^\n，。,；；！!？?]{1,16})")
+_CREATE_FIELD_MAJOR = re.compile(r"专业\s*[:：]?\s*([^\n，。,；；！!？?]{1,120})")
+# 没写「编码」标签时，紧跟在「新建课程」后面的字母数字串当成编码（「新建课程 AABB 名称：…」）。
+_CREATE_BARE_CODE = re.compile(
+    r"^\s*[:：，,]?\s*([A-Za-z0-9]{2,32})(?=\s|[，。,；；：！!？?（(]|名称|名字|$)")
+# 剩余串里这些词不是名称：「新建课程 AABB 学期2022学年」里剥出来的「学年」不能拿去建课。
+_CREATE_NAME_JUNK = {"学年", "学期", "课程", "班级", "一门", "一个", "新", "课"}
 
 # 口语填充词：切名称前整块丢掉。按长度降序匹配，否则「开一场」会被「开」切掉半截。
 _NOISE = tuple(sorted({
@@ -126,6 +148,11 @@ def _plan_once(state: AgentState) -> dict:
 
     if intent in ("query", "action") and _is_create_request(text, intent):
         return _plan_create_session(state, text, steps)
+
+    # 新建班级/课程：解析标签字段，齐了直接取 L2 预览（确认卡兜底）
+    if (intent in ("query", "action") and _CREATE_ENTITY.search(text)
+            and not _CREATE_QUESTION.search(text)):
+        return _plan_create_entity(state, text, steps)
 
     if intent == "action" and _RENAME.search(text):
         return _plan_rename(state, text, steps)
@@ -270,6 +297,147 @@ def parse_create_target(text: str, classes: list[dict[str, Any]],
             return CreateTarget(answer="请说明是哪门课程。" + _available(courses, "课程"))
 
     return CreateTarget(clazz=clazz, course=course)
+
+
+@dataclass(frozen=True)
+class CreateEntity:
+    """一次"新建班级/课程"的解析结果。`answer` 非空即为要给用户的话，不再往下走。"""
+
+    kind: str = ""
+    params: dict[str, Any] = field(default_factory=dict)
+    answer: str = ""
+
+
+def _plan_create_entity(state: AgentState, text: str, steps: int) -> dict:
+    """新建班级/课程：标签字段解析，缺什么就给例句反问，齐了直接取 L2 预览。
+
+    负责教师不在这里解析——tool_node/commit 的 apply_owner_teacher 会对教师
+    强制注入本人 ID、管理员不注入，planner 填了反而会替管理员"代选负责人"。
+    已执行过就收尾：工具跑完会回 planner，不挡就无限重建同一门课。
+    """
+    done = {r["tool"] for r in (state.get("tool_results") or [])}
+    if done & {"create_course", "create_class"}:
+        return {"plan": []}
+    parsed = _parse_create_entity(text)
+    if parsed.answer:
+        return {"plan": [], "answer": parsed.answer}
+    tool = "create_course" if parsed.kind == "课程" else "create_class"
+    return {"plan": [_step(tool, parsed.params, write=True)], "steps": steps + 1}
+
+
+def _parse_create_entity(text: str) -> CreateEntity:
+    """从整句话里认出「编码/名称/学期（年级/专业）」。
+
+    纯函数，不碰网络。先吃标签字段，再兜裸编码与剩余串当名称；
+    解析不出必填项就给例句反问——静默猜一个编码建错课，比多问一句贵得多。
+    """
+    m = _CREATE_ENTITY.search(text)
+    kind = m.group(1)
+    body = text[m.end():]
+
+    fields: dict[str, str] = {}
+    for key, pat in (("semester", _CREATE_FIELD_SEMESTER), ("grade", _CREATE_FIELD_GRADE),
+                     ("major", _CREATE_FIELD_MAJOR), ("name", _CREATE_FIELD_NAME),
+                     ("code", _CREATE_FIELD_CODE)):
+        fm = pat.search(body)
+        if fm:
+            value = fm.group(1).strip()
+            if value:
+                # 名称走同一套清洗：「名称：离散数学 学期2022」空格分隔时别把学期吞进课名
+                fields[key] = _clean_entity_name(value) if key == "name" else value
+            body = body[:fm.start()] + body[fm.end():]
+
+    if "code" not in fields:
+        bm = _CREATE_BARE_CODE.match(body)
+        if bm:
+            fields["code"] = bm.group(1)
+            body = body[bm.end():]
+
+    if "name" not in fields:
+        leftover = _clean_entity_name(body)
+        if 2 <= len(leftover) <= 60 and leftover not in _CREATE_NAME_JUNK:
+            fields["name"] = leftover
+
+    if kind == "课程":
+        # 提了「学期」却解析不出（「学期去年」）：当面反问格式，不静默丢参建课；
+        # 学期本就可选，没提就照常往下走。
+        if "semester" not in fields and re.search(r"学期", text):
+            return _course_semester_missing_entity()
+        return _build_course_entity(fields)
+    return _build_class_entity(fields)
+
+
+def _course_semester_missing_entity() -> CreateEntity:
+    return CreateEntity(answer="学期格式应形如 2026-2027-1（-1 上学期、-2 下学期）。"
+                              "例如：新建课程 AABB 名称：离散数学，学期2026-2027-1。")
+
+
+def _clean_entity_name(raw: str) -> str:
+    """剩余串 → 名称：「叫离散数学的课程」→「离散数学」。"""
+    raw = re.split(r"\s+(?:学期|年级|专业)\s*[:：]?", raw)[0]
+    raw = re.sub(r"^叫", "", raw.strip())
+    raw = re.sub(r"(?:的)?(?:课程|班级)$", "", raw)
+    return raw.strip(_PUNCT_TRIM)
+
+
+def _normalize_semester(raw: str) -> str | None:
+    """「2022」→ 2022-2023-1；「2022-2023」→ 2022-2023-1；全格式原样。
+
+    归一不出合法学期就返回 None 反问——绝不让用户确认完的卡死在参数校验上。
+    学年必须连续（2022-2024 不是学年），起止由格式兜着。
+    """
+    s = re.sub(r"\s+", "", raw).replace("—", "-").replace("~", "-").replace("至", "-")
+    m = re.fullmatch(r"(\d{4})-(\d{4})-([12])", s)
+    if m:
+        return s if int(m.group(2)) == int(m.group(1)) + 1 else None
+    m = re.fullmatch(r"(\d{4})-(\d{4})", s)
+    if m:
+        if int(m.group(2)) != int(m.group(1)) + 1:
+            return None
+        return f"{s}-1"
+    m = re.fullmatch(r"(\d{4})", s)
+    if m:
+        y = int(m.group(1))
+        return f"{y}-{y + 1}-1"
+    return None
+
+
+def _build_course_entity(fields: dict[str, str]) -> CreateEntity:
+    code = fields.get("code", "").upper()
+    name = fields.get("name", "")
+    if fields.get("code") and not re.fullmatch(r"[A-Z0-9]{2,32}", code):
+        return CreateEntity(answer="课程编码须为 2~32 位大写字母数字（例如 AABB）。")
+    semester = None
+    if "semester" in fields:
+        semester = _normalize_semester(fields["semester"])
+        if semester is None:
+            return CreateEntity(answer="学期格式应形如 2026-2027-1（-1 上学期、-2 下学期）。"
+                                      "例如：新建课程 AABB 名称：离散数学，学期2026-2027-1。")
+    missing = [label for label, value in (("编码", code), ("名称", name)) if not value]
+    if missing:
+        return CreateEntity(answer="请补上课程" + "和".join(missing)
+                                  + "。例如：新建课程 AABB 名称：离散数学，学期2026-2027-1。")
+    params: dict[str, Any] = {"code": code, "name": name}
+    if semester:
+        params["semester"] = semester
+    return CreateEntity(kind="课程", params=params)
+
+
+def _build_class_entity(fields: dict[str, str]) -> CreateEntity:
+    code = fields.get("code", "")
+    name = fields.get("name", "")
+    if fields.get("code") and not re.fullmatch(r"[A-Za-z0-9]{4,32}", code):
+        return CreateEntity(answer="班级码须为 4~32 位字母数字（例如 CS2401）。")
+    missing = [label for label, value in (("班级码", code), ("班级名称", name)) if not value]
+    if missing:
+        return CreateEntity(answer="请补上" + "和".join(missing)
+                                  + "。例如：新建班级 CS2401 名称：计算机 1 班，年级2024级，专业软件工程。")
+    params: dict[str, Any] = {"code": code, "name": name}
+    if fields.get("grade"):
+        params["grade"] = fields["grade"]
+    if fields.get("major"):
+        params["major"] = fields["major"]
+    return CreateEntity(kind="班级", params=params)
 
 
 def _strip_noise(body: str) -> str:
