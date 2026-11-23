@@ -640,7 +640,7 @@ onMounted(async () => {
         <el-button type="primary" @click="addScope">授权</el-button>
       </div>
       <p class="hint" style="margin: 8px 0 12px">
-        班级/课程的「负责教师 / 开课教师」仅是归属标注，不等于授权；教师看不到数据时，在这里添加授权。
+        课程的「开课教师」保存时会自动在这里生成授权（CR-027），可在此撤销；班级「负责教师」仅是归属标注。教师看不到数据时，也可在这里手动添加授权。
       </p>
 
       <el-table :data="scopes" v-loading="scopeLoading" size="small">
