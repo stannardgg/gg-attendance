@@ -29,6 +29,7 @@ public enum ErrorCode {
     CLASS_HAS_STUDENTS("FA-2005", HttpStatus.CONFLICT, "班级下仍有在读学生，请先转出或归档"),
     SCOPE_DENIED("FA-2006", HttpStatus.FORBIDDEN, "你未被授权该班级或该课程"),
     PROFILE_REQUEST_CONFLICT("FA-2007", HttpStatus.CONFLICT, "资料修改申请状态冲突"),
+    GRANT_DUPLICATED("FA-2008", HttpStatus.CONFLICT, "该学生已被授权此课程"),
 
     // ---- 3xxx 签到 ----
     SESSION_CLOSED("FA-3001", HttpStatus.CONFLICT, "签到会话已结束"),

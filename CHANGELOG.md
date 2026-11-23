@@ -8,6 +8,29 @@
 ## [Unreleased]
 
 ### Added
+- **开课教师同步授权（CR-027，课程管理 = 教师授权的授予入口）**：课程管理
+  选/改「开课教师」保存时，后端幂等写入 `teacher_scope(COURSE)`（已存在
+  跳过、教师不存在 FA-2001 拒绝、审计记 `SCOPE_GRANT`），教师端无需再去
+  授权范围手动授权、登录即见该课程；撤销仍走「教师与授权 → 授权范围」。
+  权限口径：管理员写 owner 才产生授权；TEACHER 建课 owner 强制本人（与
+  Agent `apply_owner_teacher` 一致，建课即自见）、改课 owner 仅作归属标注
+  不产生授权（教师只能动授权范围内的课程，不构成新授权来源）。前端两处
+  提示文案同步改写（课程表单 + 授权范围抽屉）。OrgIT 增
+  `ownerTeacherSyncsScope`（建课即见/重复保存幂等/幽灵教师 FA-2001/改
+  owner 新教师立即可见）。
+- **课程授权学生（CR-026）**：课程管理端新增「授权学生」——选班级、选学生后
+  把课程单独授权给该学生（跨班选修、转班补授场景），发起签到时并入应到
+  快照。D7 主体不动（`course` 仍无 classId、班级课程互不引用、选课表
+  `course_student` 仍不建）：新表 `course_student_grant`（V9）是**授权表**
+  （与 `teacher_scope` 同类），班级名单仍是默认应到，授权学生是**追加**
+  （UNION 去重）；撤销=物理删除；授权变动只影响新会话，已存续会话不追溯
+  （CR-001 快照语义）。端点挂课程子资源
+  `GET/POST /api/v1/admin/courses/{courseId}/grants`、
+  `DELETE .../grants/{studentId}`（TEACHER+ADMIN）；教师侧双重数据范围校验
+  （课程 requireCourse + 学生当前班级 requireClass），管理员不受限；学生
+  不在读 FA-2001、重复授权新错误码 **FA-2008**（409，四处契约同步）。
+  课程/学生物理删除分支级联清理授权行。学生端无改动——「可签会话」以
+  `session_expected` 为判据，授权并入快照后自然可见可签。
 - **Agent 负责教师口径按登录身份落实（教师本人自动带、管理员须显式给 ID）**：
   教师对话建/改班级、课程说「负责教师张三」时，Agent 不再反问教师 ID——
   catalog（`/internal/agent/tools/catalog`）新增 `identity`（teacherId + role，
