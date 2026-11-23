@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import datetime as dt
 
+from app.graph.common import OWNER_TEACHER_TOOLS, apply_owner_teacher, identity_text
 from app.graph.nodes.answer import _citations, _describe
 from app.graph.nodes.planner import _clean, _looks_like_create, parse_create_target
 from app.graph.nodes.router import _classify
@@ -236,3 +237,83 @@ def test_countdown_expired_and_future():
     future = (dt.datetime.now(dt.timezone(dt.timedelta(hours=8))) + dt.timedelta(seconds=30)).isoformat()
     assert _remaining_seconds(past) == 0
     assert 25 <= _remaining_seconds(future) <= 30
+
+
+# ---------------------------------------------------------------- 负责教师口径
+
+
+def test_owner_teacher_forced_to_self_for_teacher():
+    """教师建班级：负责人恒为本人。模型填了别人（99）也要被覆盖。"""
+    user = {"role": "TEACHER", "teacherId": 3}
+    assert apply_owner_teacher("create_class", {"code": "X", "ownerTeacherId": 99}, user)[
+        "ownerTeacherId"] == 3
+    # 缺了也要补上
+    assert apply_owner_teacher("update_class", {"classId": 1}, user)["ownerTeacherId"] == 3
+    assert apply_owner_teacher("create_course", {"code": "C"}, user)["ownerTeacherId"] == 3
+    assert apply_owner_teacher("update_course", {"courseId": 1}, user)["ownerTeacherId"] == 3
+
+
+def test_owner_teacher_not_injected_for_admin():
+    """管理员：负责人必须由用户显式提供，系统不注入也不覆盖。"""
+    user = {"role": "ADMIN", "teacherId": None}
+    params = {"code": "X"}
+    out = apply_owner_teacher("create_class", params, user)
+    assert "ownerTeacherId" not in out
+    # 用户明确给了 ID 就保留
+    assert apply_owner_teacher("update_class", {"classId": 1, "ownerTeacherId": 9}, user)[
+        "ownerTeacherId"] == 9
+
+
+def test_owner_teacher_ignores_other_tools_and_missing_identity():
+    """create_session 等工具不受影响；教师 ID 缺失（脏数据）时不注入。"""
+    user = {"role": "TEACHER", "teacherId": 3}
+    params = {"classId": 1, "courseId": 1}
+    out = apply_owner_teacher("create_session", params, user)
+    assert "ownerTeacherId" not in out
+
+    no_tid = {"role": "TEACHER", "teacherId": None}
+    assert "ownerTeacherId" not in apply_owner_teacher("create_class", {}, no_tid)
+
+
+def test_owner_teacher_params_are_copied_not_mutated():
+    """注入必须返回新 dict：params 同时进 tool_results 与 pending，就地改会串档。"""
+    user = {"role": "TEACHER", "teacherId": 3}
+    original = {"code": "X"}
+    out = apply_owner_teacher("create_class", original, user)
+    assert "ownerTeacherId" not in original and out["ownerTeacherId"] == 3
+
+
+def test_identity_text_per_role():
+    teacher = identity_text({"role": "TEACHER", "teacherId": 3})
+    assert "teacherId=3" in teacher and "不要向用户询问" in teacher
+    admin = identity_text({"role": "ADMIN", "teacherId": None})
+    assert "管理员" in admin and "不要传该字段" in admin
+    assert identity_text({"role": "TEACHER", "teacherId": None}) == ""
+    assert identity_text(None) == ""
+
+
+def test_intake_refreshes_identity_from_catalog(monkeypatch):
+    """身份以每轮现算的 catalog 为准：教师被降级成管理员后，本轮就要生效。"""
+    from app.tools.catalog import Catalog
+    import app.graph.nodes.intake as intake_mod
+
+    cat = Catalog(levels={}, class_ids=[], course_ids=[],
+                  teacher_id=None, role="ADMIN", identity_present=True, tools={})
+    monkeypatch.setattr(intake_mod, "fetch_catalog_cached", lambda *a, **k: cat)
+    out = intake_mod.intake({"query": "你好", "token": "t",
+                             "user": {"accountId": 1, "role": "TEACHER", "teacherId": 3}})
+    assert out["user"]["role"] == "ADMIN"
+    assert out["user"]["teacherId"] is None
+
+
+def test_intake_falls_back_to_profile_without_identity(monkeypatch):
+    """旧版本 Java 不下发 identity：保留界面登录时的 profile 快照。"""
+    from app.tools.catalog import Catalog
+    import app.graph.nodes.intake as intake_mod
+
+    cat = Catalog(levels={}, class_ids=[], course_ids=[], identity_present=False, tools={})
+    monkeypatch.setattr(intake_mod, "fetch_catalog_cached", lambda *a, **k: cat)
+    out = intake_mod.intake({"query": "你好", "token": "t",
+                             "user": {"accountId": 1, "role": "TEACHER", "teacherId": 3}})
+    assert out["user"]["role"] == "TEACHER"
+    assert out["user"]["teacherId"] == 3

@@ -61,7 +61,19 @@ public final class AgentDtos {
     public record CatalogScope(List<Long> classIds, List<Long> courseIds) {
     }
 
-    public record CatalogData(Map<String, Boolean> level, CatalogScope scope, List<CatalogItem> tools) {
+    /**
+     * 当前登录用户的身份快照（每轮 catalog 现算，不缓存到界面）。
+     *
+     * <p>Agent 需要「我是谁」来落实负责教师的口径：教师身份下
+     * create/update 班级、课程的 ownerTeacherId 恒为本人；管理员身份下
+     * 必须由用户显式给出教师 ID。这里只有 role 与 teacherId，
+     * 不带任何数据范围——范围仍以每次工具调用的 X-User-Token 现算为准。
+     */
+    public record AgentIdentity(Long teacherId, String role) {
+    }
+
+    public record CatalogData(Map<String, Boolean> level, CatalogScope scope,
+                              AgentIdentity identity, List<CatalogItem> tools) {
     }
 
     /** 工具执行结果：data 给 Agent，count 用于回答末尾的「命中 N 条」。 */

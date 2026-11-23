@@ -8,6 +8,17 @@
 ## [Unreleased]
 
 ### Added
+- **Agent 负责教师口径按登录身份落实（教师本人自动带、管理员须显式给 ID）**：
+  教师对话建/改班级、课程说「负责教师张三」时，Agent 不再反问教师 ID——
+  catalog（`/internal/agent/tools/catalog`）新增 `identity`（teacherId + role，
+  每轮现算，不用界面登录快照），Agent 三层落实：① system prompt 与
+  身份消息写死口径（教师=本人，管理员=必须显式提供数字 ID、未提不传）；
+  ② `apply_owner_teacher` 在 tool_node 与 commit 两处对
+  `create/update_class/course` 教师身份强制 `ownerTeacherId=本人`（确定性
+  兜底，模型填了别人也覆盖；管理员通道不注入），预览与提交同规则归一，
+  paramsHash 一致；③ Java 预览把 ownerTeacherId 渲染为「姓名（#ID）」并
+  在预览阶段校验教师存在（悬挂 ID 预览即拒，不等到确认后失败）。契约
+  `internal.yaml` 同步 `identity` 字段；AgentIT 断言管理员/教师身份下发。
 - **活体伪装/遮挡识别（口罩/墨镜/帽子，CR-025，默认开）**：新增
   `app/challenge/disguise.py`，在 192 对齐空间上判「脸上有没有遮挡物」——
   此前戴口罩签到只会拿到 FA-4001（检不出）或 FA-4005（不匹配），报错与
@@ -57,6 +68,13 @@
   确认卡，用户回复后无从执行（事故第一环）。回归测试 `tests/test_history.py`。
 
 ### Changed
+- **「归属 ≠ 授权」显性化（班级/课程「负责教师」不等于授权）**：教师可见范围
+  一直只由 `teacher_scope`（教师管理 → 授权范围）决定，「负责教师/开课教师」
+  只是归属标注字段（`owner_teacher_id`），但极易被误当成授权入口——
+  Agent 或管理员建班时带了负责教师，教师端依然看不到（授权空集）。
+  行为不变，只补提示：admin-web 班级/课程表单教师字段下方、教师管理
+  「授权范围」抽屉顶部新增说明文案；项目文档 §3.1 增补「负责教师不是授权」、
+  §8.4.3 增补固定提示的交互约定。
 - **恢复闭眼/转头 hold=2（同日撤销 hold=1 修正）**：前置优化把服务端单帧
   从 ~800ms 压到 ~300ms——检测输入 640→320（上传帧本来就是 320×240，旧值
   等于放大一倍再检测，纯浪费，det 460ms→~130ms，`FA_DET_SIZE` 可回退）+

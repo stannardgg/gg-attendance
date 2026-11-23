@@ -135,6 +135,9 @@ class AgentIT extends ItBase {
                 .as("L3 高危能力默认关闭（sys_config 未配置时取默认值）")
                 .isFalse();
         assertThat(resp.getBody().path("data").path("tools").size()).isGreaterThan(20);
+        // 身份随 catalog 每轮下发：Agent 据此把负责教师落为本人（教师）/要求显式 ID（管理员）
+        assertThat(resp.getBody().path("data").path("identity").path("role").asText()).isEqualTo("ADMIN");
+        assertThat(resp.getBody().path("data").path("identity").path("teacherId").isNull()).isTrue();
 
         HttpHeaders noToken = new HttpHeaders();
         noToken.set("X-User-Token", admin);
@@ -160,6 +163,16 @@ class AgentIT extends ItBase {
         post("/api/v1/admin/teachers",
                 Map.of("teacherNo", teacherNo, "name", "Agent教师", "password", "Teacher12345"), admin);
         String teacher = login(teacherNo, "Teacher12345");
+
+        // 教师的 catalog 必须带 identity.teacherId——Agent 靠它把负责人落为本人
+        HttpHeaders th = new HttpHeaders();
+        th.set("X-Internal-Token", INTERNAL);
+        th.set("X-User-Token", teacher);
+        ResponseEntity<JsonNode> tcat = rest.exchange("/internal/agent/tools/catalog?userId=1",
+                HttpMethod.GET, new HttpEntity<>(null, th), JsonNode.class);
+        assertThat(code(tcat)).isEqualTo("FA-0000");
+        assertThat(tcat.getBody().path("data").path("identity").path("role").asText()).isEqualTo("TEACHER");
+        assertThat(tcat.getBody().path("data").path("identity").path("teacherId").asLong()).isPositive();
 
         // 这个班不在该教师的 teacher_scope 里，写操作必须被挡
         ResponseEntity<JsonNode> resp = tool("update_class",

@@ -205,6 +205,41 @@ def test_bare_class_plus_checkin_also_creates(patch_graph, fake_tools, user, mon
     assert fake_tools.calls[0]["params"] == {"classId": 28, "courseId": 16}
 
 
+def test_teacher_create_class_owner_forced_to_self(patch_graph, fake_tools, user):
+    """教师建班级：负责人一律是登录教师本人。
+
+    模型把用户口中的「张三」填成别的教师 ID，是一次给别人班级改主的越权写入，
+    所以在工具调用前强制覆盖——确认卡上显示的负责人就是本人。
+    """
+    fake_tools.responses["create_class"] = {
+        "requiresConfirm": True, "confirmToken": "tk-3", "expiresAt": "2099-01-01T00:00:00",
+        "preview": {"actionLabel": "新建班级", "affectedCount": 1, "undoable": True},
+    }
+    _session(user).ask("建班", forced={"tool": "create_class",
+                                       "params": {"code": "X001", "name": "新班级",
+                                                  "ownerTeacherId": 99}, "write": True})
+    assert fake_tools.calls[-1]["params"]["ownerTeacherId"] == user["teacherId"]
+
+
+def test_teacher_create_class_owner_missing_is_injected(patch_graph, fake_tools, user):
+    """教师没说负责人（最常见）：直接用本人 ID，不再反问。"""
+    _session(user).ask("建班", forced={"tool": "create_class",
+                                       "params": {"code": "X001", "name": "新班级"},
+                                       "write": True})
+    assert fake_tools.calls[-1]["params"]["ownerTeacherId"] == user["teacherId"]
+
+
+def test_admin_create_class_owner_not_injected(patch_graph, fake_tools):
+    """管理员：负责人必须显式提供，系统不代填。"""
+    admin_user = {"accountId": 1, "role": "ADMIN", "teacherId": None,
+                  "levels": {"L0": True, "L1": True, "L2": True, "L3": False},
+                  "classIds": [1], "courseIds": [1]}
+    _session(admin_user).ask("建班", forced={"tool": "create_class",
+                                             "params": {"code": "X001", "name": "新班级"},
+                                             "write": True})
+    assert "ownerTeacherId" not in fake_tools.calls[-1]["params"]
+
+
 def test_create_session_reports_missing_object(patch_graph, fake_tools, user, monkeypatch):
     """库里没有就叫「未存在」，不调任何工具，也不去猜一个最近的班。"""
     import app.graph.nodes.planner as planner_mod

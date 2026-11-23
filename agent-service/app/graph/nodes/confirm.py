@@ -13,6 +13,7 @@ import logging
 
 from langgraph.types import interrupt
 
+from app.graph.common import apply_owner_teacher
 from app.graph.state import AgentState
 from app.tools.catalog import ToolError
 from app.tools.registry import ToolClient
@@ -52,6 +53,10 @@ def commit(state: AgentState) -> dict:
     pending = state.get("pending") or {}
     tool = pending.get("tool")
     params = pending.get("params") or {}
+    # 与预览同一规则再归一一次：正常路径是恒等变换（pending.params 已注入过），
+    # 升级窗口里恢复的旧检查点则在这里补上——同一 pending 两次结果必须一致，
+    # 否则 paramsHash 对不上，确认永远失败。
+    params = apply_owner_teacher(tool, params, state.get("user"))
     client = ToolClient(state["token"], int(state["user"]["accountId"]))
     results = list(state.get("tool_results") or [])
     citations = list(state.get("citations") or [])

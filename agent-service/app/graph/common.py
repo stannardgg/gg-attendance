@@ -1,4 +1,4 @@
-"""节点共用的小工具：日期口径、金额/比率格式化、敏感意图识别、对话记忆裁剪。"""
+"""节点共用的小工具：日期口径、金额/比率格式化、敏感意图识别、对话记忆裁剪、负责教师口径。"""
 
 from __future__ import annotations
 
@@ -81,3 +81,39 @@ def llm_history_messages(history: list[dict] | None) -> list[dict[str, str]]:
             continue
         msgs.append({"role": role, "content": content[:HISTORY_MSG_CHARS]})
     return msgs
+
+
+# ------------------------------------------------------------------ 负责教师
+# 教师建/改班级、课程时负责人恒为本人。这是产品口径，也必须是确定性规则：
+# 模型把负责人填成用户随口提到的其他教师，就是一次给别人的班级改主的写入——
+# 所以在工具调用前强制归一，而不是指望提示词管住模型。
+# 管理员通道不做任何注入：负责人必须由用户显式提供教师 ID，没给就不传（= 不改）。
+
+OWNER_TEACHER_TOOLS = frozenset({"create_class", "update_class", "create_course", "update_course"})
+
+
+def apply_owner_teacher(tool: str, params: dict | None, user: dict | None) -> dict:
+    """教师身份强制 ownerTeacherId = 本人；管理员与其他工具原样返回（拷贝入参）。"""
+    params = dict(params or {})
+    if tool not in OWNER_TEACHER_TOOLS:
+        return params
+    u = user or {}
+    tid = u.get("teacherId")
+    if u.get("role") == "TEACHER" and tid:
+        params["ownerTeacherId"] = int(tid)
+    return params
+
+
+def identity_text(user: dict | None) -> str:
+    """给模型身份消息：把 ownerTeacherId 的口径按角色写死，别让模型自己发挥。"""
+    u = user or {}
+    tid, role = u.get("teacherId"), u.get("role")
+    if role == "TEACHER" and tid:
+        return (f"当前登录用户是教师，teacherId={tid}。调用 create_class/update_class/"
+                f"create_course/update_course 时 ownerTeacherId 一律填 {tid}（本人），"
+                f"不要向用户询问负责教师，即使用户提到其他教师的姓名。")
+    if role == "ADMIN":
+        return ("当前登录用户是管理员。ownerTeacherId 必须由用户明确提供教师 ID（数字）；"
+                "只给姓名时说明无法按姓名解析，请用户补 ID；用户未提负责人就不要传该字段，"
+                "不要猜测或代填。")
+    return ""

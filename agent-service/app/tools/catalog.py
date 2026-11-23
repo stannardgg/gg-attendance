@@ -33,6 +33,12 @@ class Catalog:
     levels: dict[str, bool] = field(default_factory=dict)
     class_ids: list[int] = field(default_factory=list)
     course_ids: list[int] = field(default_factory=list)
+    # 当前登录用户身份（Java 每轮现算）。identity_present 区分「服务端没下发」
+    # （旧版本 Java，回落到界面登录时的 profile 快照）与「下发了且教师 ID 为空」
+    # （管理员，teacherId 本来就是 None）——这两种情况的处理不同。
+    teacher_id: int | None = None
+    role: str | None = None
+    identity_present: bool = False
     tools: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     def has(self, name: str) -> bool:
@@ -63,13 +69,24 @@ def fetch_catalog(user_token: str, user_id: int) -> Catalog:
     data = payload.get("data") or {}
     tools = {t["name"]: t for t in (data.get("tools") or [])}
     scope = data.get("scope") or {}
+    identity = data.get("identity") if isinstance(data.get("identity"), dict) else {}
     log.info("catalog-loaded tools=%d levels=%s", len(tools), data.get("level"))
     return Catalog(
         levels=data.get("level") or {},
         class_ids=[int(x) for x in (scope.get("classIds") or [])],
         course_ids=[int(x) for x in (scope.get("courseIds") or [])],
+        teacher_id=_opt_int(identity.get("teacherId")),
+        role=identity.get("role") or None,
+        identity_present=bool(identity),
         tools=tools,
     )
+
+
+def _opt_int(value: Any) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _parse(resp: httpx.Response) -> dict[str, Any]:
