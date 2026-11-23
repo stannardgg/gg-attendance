@@ -7,9 +7,11 @@ import com.fa.infra.audit.AuditWriter;
 import com.fa.common.error.BizException;
 import com.fa.common.error.ErrorCode;
 import com.fa.org.api.dto.ScopeDtos;
+import com.fa.org.domain.FaceConsentRecord;
 import com.fa.org.domain.FaceProfile;
 import com.fa.org.domain.FaceVector;
 import com.fa.org.domain.Student;
+import com.fa.org.infra.FaceConsentRecordMapper;
 import com.fa.org.infra.FaceDuplicateChecker;
 import com.fa.org.infra.FaceProfileMapper;
 import com.fa.org.infra.FaceVectorMapper;
@@ -22,6 +24,7 @@ import java.util.ArrayList;
 import java.util.Base64;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -64,12 +67,20 @@ public class FaceEnrollService {
     /** 与 face 服务 {@code ENROLL_KEY_PREFIX} 必须一致。 */
     static final String SAMPLE_KEY_PREFIX = "fa:enroll:sample:";
 
+    /**
+     * 当前生效的《人脸信息采集与使用告知》版本（全文见 docs/compliance/face-consent-notice-v2.md）。
+     * 与移动端 EnrollView 的 {@code CONSENT_VERSION} 必须同步升级；升版时旧同意不自动顺延，
+     * 学生须重新阅读并同意（CR-028）。
+     */
+    public static final String CONSENT_VERSION_CURRENT = "v2";
+
     private static final int MIN_SAMPLES = 5;
     private static final int MAX_SAMPLES = 10;
     private static final int EXPECTED_DIM = 512;
 
     private final FaceProfileMapper profileMapper;
     private final FaceVectorMapper vectorMapper;
+    private final FaceConsentRecordMapper consentMapper;
     private final StudentMapper studentMapper;
     private final StringRedisTemplate redis;
     private final JdbcTemplate jdbc;
@@ -79,11 +90,13 @@ public class FaceEnrollService {
     private final FaceDuplicateChecker duplicateChecker;
 
     public FaceEnrollService(FaceProfileMapper profileMapper, FaceVectorMapper vectorMapper,
-                             StudentMapper studentMapper, StringRedisTemplate redis,
+                             FaceConsentRecordMapper consentMapper, StudentMapper studentMapper,
+                             StringRedisTemplate redis,
                              JdbcTemplate jdbc, AuditWriter audit, ObjectMapper json,
                              VectorCrypto vectorCrypto, FaceDuplicateChecker duplicateChecker) {
         this.profileMapper = profileMapper;
         this.vectorMapper = vectorMapper;
+        this.consentMapper = consentMapper;
         this.studentMapper = studentMapper;
         this.redis = redis;
         this.jdbc = jdbc;
@@ -93,13 +106,105 @@ public class FaceEnrollService {
         this.duplicateChecker = duplicateChecker;
     }
 
-    /** 本人档案状态；从未采集返回 NONE（不建行，读接口不该有写副作用）。 */
+    /** 本人档案状态 + 当前同意态（CR-028）；从未采集返回 NONE（不建行，读接口不该有写副作用）。 */
     public ScopeDtos.FaceStatusResp status(long studentId) {
+        Student student = studentMapper.selectById(studentId);
+        AccountConsent consent = loadConsent(student == null ? null : student.getAccountId());
         FaceProfile p = findProfile(studentId);
         if (p == null) {
-            return new ScopeDtos.FaceStatusResp(studentId, "NONE", 0, null, null, null);
+            return new ScopeDtos.FaceStatusResp(studentId, "NONE", 0, null, null, null,
+                    consent.version(), consent.at());
         }
-        return toResp(p);
+        return toResp(p, consent);
+    }
+
+    /**
+     * 记录「单独同意」（CR-028）。
+     *
+     * <p>PIPL §29：人脸属敏感个人信息，处理前须取得「单独同意」——必须是数据主体
+     * 针对本事项的显式动作（阅读全文后点「同意」），勾选框、静默继续、与其他协议
+     * 捆绑勾选都不构成。同意事件写 {@code face_consent_record}（只增不改），
+     * {@code account.face_consent_*} 只保留当前态供展示。
+     *
+     * <p>幂等：同一账号 + 同一版本已有 ACCEPT 时不产生新事件、不刷新原同意时间——
+     * 同意时间必须反映第一次同意，重复点击不能洗掉时间线。
+     */
+    @Transactional
+    public ScopeDtos.FaceStatusResp consent(long studentId, String consentVersion) {
+        Student student = studentMapper.selectById(studentId);
+        if (student == null) {
+            throw new BizException(ErrorCode.NOT_FOUND, "学生不存在");
+        }
+        if (student.getAccountId() == null) {
+            throw new BizException(ErrorCode.NOT_FOUND, "账号状态异常，无法记录同意");
+        }
+        if (!CONSENT_VERSION_CURRENT.equals(consentVersion)) {
+            throw new BizException(ErrorCode.FACE_CONSENT_REQUIRED, "该同意书版本不存在或已停用，请刷新页面后重新阅读");
+        }
+        Long existed = consentMapper.selectCount(Wrappers.<FaceConsentRecord>lambdaQuery()
+                .eq(FaceConsentRecord::getAccountId, student.getAccountId())
+                .eq(FaceConsentRecord::getAction, "ACCEPT")
+                .eq(FaceConsentRecord::getConsentVersion, consentVersion));
+        if (existed == null || existed == 0) {
+            LocalDateTime now = LocalDateTime.now();
+            FaceConsentRecord r = new FaceConsentRecord();
+            r.setAccountId(student.getAccountId());
+            r.setStudentId(studentId);
+            r.setAction("ACCEPT");
+            r.setConsentVersion(consentVersion);
+            r.setCreatedAt(now);
+            consentMapper.insert(r);
+            jdbc.update("update account set face_consent_at = ?, face_consent_version = ? where id = ?",
+                    now, consentVersion, student.getAccountId());
+            audit.write("FACE_CONSENT", "STUDENT", studentId, "记录人脸采集单独同意（" + consentVersion + "）");
+            log.info("face consent recorded studentId={} version={}", studentId, consentVersion);
+        }
+        return status(studentId);
+    }
+
+    /**
+     * 数据主体行使删除权（CR-028）：本人删除人脸向量与档案，并撤回采集同意。
+     *
+     * <p>语义边界：删除对象是人脸相关数据（加密向量、档案状态、同意状态）；
+     * 由既往签到产生的考勤记录属考勤业务数据，不随本次删除清除（告知书 v2 已写明）。
+     * 删除权不因审核流程未走完而受限——PENDING_REVIEW / REJECTED / ACTIVE 任意状态
+     * 都可以删，删后回到 NONE，可随时重新采集（重新采集须重新同意）。
+     */
+    @Transactional
+    public ScopeDtos.FaceStatusResp deleteOwnData(long studentId) {
+        Student student = studentMapper.selectById(studentId);
+        if (student == null) {
+            throw new BizException(ErrorCode.NOT_FOUND, "学生不存在");
+        }
+        FaceProfile profile = findProfile(studentId);
+        Long vectorCount = vectorMapper.selectCount(
+                Wrappers.<FaceVector>lambdaQuery().eq(FaceVector::getStudentId, studentId));
+        boolean hasData = (vectorCount != null && vectorCount > 0)
+                || (profile != null && !"NONE".equals(profile.getStatus()));
+        if (!hasData) {
+            throw new BizException(ErrorCode.NOT_FOUND, "暂无人脸数据可删除");
+        }
+        AccountConsent current = loadConsent(student.getAccountId());
+        // 敏感数据本体：整批物理删除（向量加密存储，删除后即刻不可恢复）
+        vectorMapper.delete(Wrappers.<FaceVector>lambdaQuery().eq(FaceVector::getStudentId, studentId));
+        if (profile != null) {
+            profileMapper.deleteById(profile.getId());
+        }
+        if (student.getAccountId() != null) {
+            FaceConsentRecord r = new FaceConsentRecord();
+            r.setAccountId(student.getAccountId());
+            r.setStudentId(studentId);
+            r.setAction("WITHDRAW");
+            r.setConsentVersion(current.version());
+            r.setCreatedAt(LocalDateTime.now());
+            consentMapper.insert(r);
+            jdbc.update("update account set face_consent_at = NULL, face_consent_version = NULL where id = ?",
+                    student.getAccountId());
+        }
+        audit.write("FACE_DATA_DELETE", "STUDENT", studentId,
+                "学生本人删除人脸数据并撤回同意（删除向量 " + (vectorCount == null ? 0 : vectorCount) + " 条）");
+        log.info("face data deleted by owner studentId={} vectors={}", studentId, vectorCount);
+        return status(studentId);
     }
 
     @Transactional
@@ -118,6 +223,24 @@ public class FaceEnrollService {
             throw new BizException(ErrorCode.CODE_DUPLICATED, "人脸已通过审核，无需重复采集");
         }
 
+        // 单独同意（§13.4 / CR-028）：服务端强制——同意必须是本人对当前版本文本的
+        // 显式动作且已入事件表，勾选框或前端开关不作为依据。FA-4010 从这里兜底；
+        // 被拒请求不会留下向量、档案状态或同意事件。
+        if (!CONSENT_VERSION_CURRENT.equals(req.consentVersion())) {
+            throw new BizException(ErrorCode.FACE_CONSENT_REQUIRED, "同意书版本已更新，请刷新页面重新阅读并同意");
+        }
+        if (student.getAccountId() == null) {
+            throw new BizException(ErrorCode.FACE_CONSENT_REQUIRED, "账号状态异常，无法确认采集同意");
+        }
+        Long accepted = consentMapper.selectCount(Wrappers.<FaceConsentRecord>lambdaQuery()
+                .eq(FaceConsentRecord::getAccountId, student.getAccountId())
+                .eq(FaceConsentRecord::getAction, "ACCEPT")
+                .eq(FaceConsentRecord::getConsentVersion, CONSENT_VERSION_CURRENT));
+        if (accepted == null || accepted == 0) {
+            throw new BizException(ErrorCode.FACE_CONSENT_REQUIRED,
+                    "未取得有效的人脸采集单独同意，请先在采集页阅读告知并点「同意」");
+        }
+
         List<String> keys = normalizeKeys(req.sampleKeys());
         List<FaceVector> vectors = new ArrayList<>(keys.size());
         for (String key : keys) {
@@ -125,7 +248,7 @@ public class FaceEnrollService {
         }
 
         // 一人一档（CR-014）：命中他人档案就整单拒绝，此时还没写任何东西。
-        // 查重放在 consent 之前——被拒的请求不该在账号上留下同意时间戳。
+        // （同意记录由独立的 consent 端点在采集前落库，与本请求解耦，CR-028。）
         List<byte[]> probes = new ArrayList<>(vectors.size());
         for (FaceVector v : vectors) {
             probes.add(v.getEmbedding());
@@ -135,8 +258,7 @@ public class FaceEnrollService {
                     "这张人脸已用于其他学生档案，请联系老师核实");
         });
 
-        // 单独同意（§13.4）：没同意不许落库。账号维度记录时间与版本，便于回溯。
-        writeConsent(student.getAccountId(), req.consentVersion());
+        // 单独同意已在 consent 端点落事件表并通过上方校验；这里不再重复写 account 字段（CR-028）
 
         // 驳回后重采：旧向量整批替换，避免与旧照片混用同一份比对集
         vectorMapper.delete(Wrappers.<FaceVector>lambdaQuery().eq(FaceVector::getStudentId, studentId));
@@ -165,7 +287,7 @@ public class FaceEnrollService {
 
         audit.write("FACE_ENROLL", "STUDENT", studentId, "提交人脸采集 " + vectors.size() + " 张");
         log.info("face enroll studentId={} samples={}", studentId, vectors.size());
-        return toResp(target);
+        return toResp(target, loadConsent(student.getAccountId()));
     }
 
     // ---------------- 内部 ----------------
@@ -175,9 +297,41 @@ public class FaceEnrollService {
                 Wrappers.<FaceProfile>lambdaQuery().eq(FaceProfile::getStudentId, studentId));
     }
 
-    private static ScopeDtos.FaceStatusResp toResp(FaceProfile p) {
+    private static ScopeDtos.FaceStatusResp toResp(FaceProfile p, AccountConsent consent) {
         return new ScopeDtos.FaceStatusResp(p.getStudentId(), p.getStatus(), p.getSampleCount(),
-                p.getSubmittedAt(), p.getReviewedAt(), p.getRejectReason());
+                p.getSubmittedAt(), p.getReviewedAt(), p.getRejectReason(),
+                consent.version(), consent.at());
+    }
+
+    /** account 表上的当前同意态（仅展示用；事实来源是 face_consent_record 事件流）。 */
+    private record AccountConsent(String version, LocalDateTime at) {
+        static AccountConsent empty() {
+            return new AccountConsent(null, null);
+        }
+    }
+
+    private AccountConsent loadConsent(Long accountId) {
+        if (accountId == null) {
+            return AccountConsent.empty();
+        }
+        List<Map<String, Object>> rows = jdbc.queryForList(
+                "select face_consent_version, face_consent_at from account where id = ?", accountId);
+        if (rows.isEmpty()) {
+            return AccountConsent.empty();
+        }
+        Map<String, Object> row = rows.get(0);
+        Object at = row.get("face_consent_at");
+        LocalDateTime atTime;
+        if (at == null) {
+            atTime = null;
+        } else if (at instanceof LocalDateTime ldt) {
+            atTime = ldt;
+        } else if (at instanceof java.sql.Timestamp ts) {
+            atTime = ts.toLocalDateTime();
+        } else {
+            atTime = null;
+        }
+        return new AccountConsent((String) row.get("face_consent_version"), atTime);
     }
 
     private static List<String> normalizeKeys(List<String> raw) {
@@ -237,20 +391,7 @@ public class FaceEnrollService {
         }
     }
 
-    private void writeConsent(Long accountId, String consentVersion) {
-        if (accountId == null) {
-            log.warn("student without accountId, skip consent record");
-            return;
-        }
-        jdbc.update("update account set face_consent_at = ?, face_consent_version = ? where id = ?",
-                LocalDateTime.now(), truncate16(consentVersion), accountId);
-    }
-
     private static String truncate(String s) {
         return s == null || s.length() <= 32 ? s : s.substring(0, 32);
-    }
-
-    private static String truncate16(String s) {
-        return s == null || s.length() <= 16 ? s : s.substring(0, 16);
     }
 }
