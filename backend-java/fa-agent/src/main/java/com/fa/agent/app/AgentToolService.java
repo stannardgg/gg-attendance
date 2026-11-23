@@ -67,7 +67,11 @@ public class AgentToolService {
         requireRole(principal);
         AgentDtos.CatalogScope scope = new AgentDtos.CatalogScope(
                 List.copyOf(principal.classIds()), List.copyOf(principal.courseIds()));
-        return new AgentDtos.CatalogData(levels.levels(), scope, registry.catalog());
+        // 身份随 catalog 每轮现算：Agent 据此落实「负责教师 = 教师本人」的口径，
+        // 不能用界面登录时的快照——角色中途被管理员调整后，快照就撒谎了。
+        AgentDtos.AgentIdentity identity = new AgentDtos.AgentIdentity(
+                principal.teacherId(), principal.user().role());
+        return new AgentDtos.CatalogData(levels.levels(), scope, identity, registry.catalog());
     }
 
     // ============================ invoke ============================

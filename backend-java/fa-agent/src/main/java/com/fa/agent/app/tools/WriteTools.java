@@ -424,13 +424,20 @@ public class WriteTools {
                     Params p = Params.of(raw, schema);
                     String code = p.requireStr("code");
                     String name = p.requireStr("name");
+                    List<AgentDtos.FieldDiff> diffs = new ArrayList<>(List.of(
+                            new AgentDtos.FieldDiff("code", "班级码", "-", code),
+                            new AgentDtos.FieldDiff("name", "班级名称", "-", name)));
+                    Long owner = p.lng("ownerTeacherId");
+                    if (owner != null) {
+                        diffs.add(new AgentDtos.FieldDiff("ownerTeacherId", "负责教师",
+                                "-", teacherLabel(owner, true)));
+                    }
                     AgentDtos.Preview preview = new AgentDtos.Preview(
                             "新建班级",
                             code + " " + name,
                             1,
                             "将新增 1 个班级",
-                            List.of(new AgentDtos.FieldDiff("code", "班级码", "-", code),
-                                    new AgentDtos.FieldDiff("name", "班级名称", "-", name)),
+                            diffs,
                             true, null, null);
                     return new ToolSpec.Plan(preview, Map.of("none", true));
                 })
@@ -480,6 +487,7 @@ public class WriteTools {
                     List<AgentDtos.FieldDiff> diffs = diff(c, raw, Map.of(
                             "name", "班级名称", "grade", "年级", "major", "专业",
                             "ownerTeacherId", "负责教师", "remark", "备注"));
+                    diffs = withTeacherNames(diffs, c, raw);
                     AgentDtos.Preview preview = new AgentDtos.Preview(
                             "编辑班级：" + c.get("name"), String.valueOf(c.get("code")),
                             diffs.isEmpty() ? 0 : 1,
@@ -558,12 +566,19 @@ public class WriteTools {
                     Params p = Params.of(raw, schema);
                     String code = p.requireStr("code");
                     String name = p.requireStr("name");
+                    List<AgentDtos.FieldDiff> diffs = new ArrayList<>(List.of(
+                            new AgentDtos.FieldDiff("code", "课程编码", "-", code),
+                            new AgentDtos.FieldDiff("name", "课程名称", "-", name),
+                            new AgentDtos.FieldDiff("semester", "学期", "-",
+                                    p.str("semester") == null ? "" : p.str("semester"))));
+                    Long owner = p.lng("ownerTeacherId");
+                    if (owner != null) {
+                        diffs.add(new AgentDtos.FieldDiff("ownerTeacherId", "开课教师",
+                                "-", teacherLabel(owner, true)));
+                    }
                     AgentDtos.Preview preview = new AgentDtos.Preview(
                             "新建课程", code + " " + name, 1, "将新增 1 门课程",
-                            List.of(new AgentDtos.FieldDiff("code", "课程编码", "-", code),
-                                    new AgentDtos.FieldDiff("name", "课程名称", "-", name),
-                                    new AgentDtos.FieldDiff("semester", "学期", "-",
-                                            p.str("semester") == null ? "" : p.str("semester"))),
+                            diffs,
                             true, null, null);
                     return new ToolSpec.Plan(preview, Map.of("none", true));
                 })
@@ -612,6 +627,7 @@ public class WriteTools {
                     List<AgentDtos.FieldDiff> diffs = diff(c, raw, Map.of(
                             "name", "课程名称", "semester", "学期",
                             "ownerTeacherId", "开课教师", "remark", "备注"));
+                    diffs = withTeacherNames(diffs, c, raw);
                     AgentDtos.Preview preview = new AgentDtos.Preview(
                             "编辑课程：" + c.get("name"), String.valueOf(c.get("code")),
                             diffs.isEmpty() ? 0 : 1,
@@ -730,6 +746,50 @@ public class WriteTools {
     }
 
     // ============================ 辅助 ============================
+
+    /**
+     * 负责教师显示名：{@code 张三（#5）}。确认卡上不能只有裸数字——
+     * 教师看不到 {@code ownerTeacherId=5} 是谁，确认就变成了盲签。
+     *
+     * <p>{@code mustExist=true} 用于「即将写入」的值：教师不存在时预览直接失败，
+     * 不让一个悬挂 ID 等到确认执行后才报错。{@code false} 用于 diff 的「变更前」——
+     * 历史数据里可能已经躺着被删教师的 ID，展示降级为 {@code #ID}，不影响操作。
+     */
+    private String teacherLabel(Long teacherId, boolean mustExist) {
+        if (teacherId == null) {
+            return "-";
+        }
+        Map<String, Object> t = queries.queryOne(
+                "SELECT name FROM teacher WHERE id = ?", teacherId);
+        if (t == null) {
+            if (mustExist) {
+                throw new BizException(ErrorCode.NOT_FOUND,
+                        "教师不存在（ID " + teacherId + "），请核对后重试");
+            }
+            return "#" + teacherId;
+        }
+        return t.get("name") + "（#" + teacherId + "）";
+    }
+
+    /** 把 diff 里 ownerTeacherId 行的 before/after 换成教师姓名。 */
+    private List<AgentDtos.FieldDiff> withTeacherNames(List<AgentDtos.FieldDiff> diffs,
+                                                       Map<String, Object> current,
+                                                       Map<String, Object> raw) {
+        List<AgentDtos.FieldDiff> out = new ArrayList<>(diffs.size());
+        for (AgentDtos.FieldDiff d : diffs) {
+            if (!"ownerTeacherId".equals(d.field())) {
+                out.add(d);
+                continue;
+            }
+            Long before = current.get("ownerTeacherId") == null
+                    ? null : ((Number) current.get("ownerTeacherId")).longValue();
+            Long after = raw.get("ownerTeacherId") == null
+                    ? null : ((Number) raw.get("ownerTeacherId")).longValue();
+            out.add(new AgentDtos.FieldDiff(d.field(), d.label(),
+                    teacherLabel(before, false), teacherLabel(after, true)));
+        }
+        return out;
+    }
 
     private Map<String, Object> requireStudentInSession(ToolCtx ctx, long sessionId, long studentId) {
         Map<String, Object> stu = queries.queryOne("""

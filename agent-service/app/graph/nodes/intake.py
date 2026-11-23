@@ -47,6 +47,11 @@ def intake(state: AgentState) -> dict:
     enriched["classIds"] = catalog.class_ids
     enriched["courseIds"] = catalog.course_ids
     enriched["toolCount"] = len(catalog.tools)
+    # 身份以每轮现算的 catalog 为准；旧版本 Java 没下发 identity 时才退回
+    # 界面登录时的 profile 快照。负责教师的口径依赖它，快照过期 = 改错负责人。
+    if catalog.identity_present:
+        enriched["teacherId"] = catalog.teacher_id
+        enriched["role"] = catalog.role
     return {"user": enriched, "intent": ""}
 
 

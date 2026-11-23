@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from app.config import settings
-from app.graph.common import fmt_date, llm_history_messages, monday_of_this_week, today
+from app.graph.common import fmt_date, identity_text, llm_history_messages, monday_of_this_week, today
 from app.graph.state import AgentState
 from app.llm.client import LlmUnavailable, chat
 from app.llm.prompts import SYSTEM_PROMPT
@@ -486,6 +486,9 @@ def _llm_plan(state: AgentState, text: str, steps: int) -> dict:
         {"role": "system", "content": "可用工具（只能从中选，不要编造）: "
                                       + ", ".join(t["function"]["name"] for t in tools)},
     ]
+    identity = identity_text(state.get("user") or {})
+    if identity:
+        messages.append({"role": "system", "content": identity})
     # 跨轮记忆：没有它，「确认」「就查它」这类指代在模型眼里是无上下文的孤句，
     # 只能回"没有待确认的操作记录"。历史只作理解用，工具调用仍以本轮为准。
     history = llm_history_messages(state.get("history"))

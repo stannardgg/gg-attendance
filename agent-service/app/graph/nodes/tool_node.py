@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 
+from app.graph.common import apply_owner_teacher
 from app.graph.state import AgentState
 from app.tools.catalog import ToolError
 from app.tools.registry import ToolClient
@@ -24,6 +25,8 @@ def tool_node(state: AgentState) -> dict:
     step = plan.pop(0)
     tool = step["tool"]
     params = step.get("params") or {}
+    # 教师身份下建/改班级、课程，负责人强制为本人——确定性规则，不靠模型自觉
+    params = apply_owner_teacher(tool, params, state.get("user"))
     tool_call_id = step.get("id")
 
     client = ToolClient(state["token"], int(state["user"]["accountId"]))
