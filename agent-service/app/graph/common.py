@@ -1,4 +1,4 @@
-"""节点共用的小工具：日期口径、金额/比率格式化、敏感意图识别。"""
+"""节点共用的小工具：日期口径、金额/比率格式化、敏感意图识别、对话记忆裁剪。"""
 
 from __future__ import annotations
 
@@ -52,3 +52,32 @@ def fmt_date(value: dt.date | str | None) -> str:
     if isinstance(value, str):
         return value[:10]
     return value.isoformat()
+
+
+# ------------------------------------------------------------------ 对话记忆
+# 模型只看得到当轮一句话是「确认」时最典型的失忆现场：
+# 上一轮它自己说「回复确认我就提交」，这一轮它却回「没有待确认的操作记录」。
+# 所以调用方（UI/测试）每轮把此前的对话注入 state，这里统一做裁剪与清洗，
+# 保证注入提示词的体量有上界：条数和单条长度都封顶，长回答只留开头。
+
+HISTORY_MAX_MSGS = 8
+HISTORY_MSG_CHARS = 300
+
+
+def llm_history_messages(history: list[dict] | None) -> list[dict[str, str]]:
+    """把调用方注入的历史会话压成可直接放进 LLM messages 的形态。
+
+    只保留 user/assistant 两种角色、剔除空内容；时间正序（旧→新），
+    当前提问永远排在消息列表最后，模型按出现顺序理解对话。
+    纯函数，不碰网络，单测直接喂假数据。
+    """
+    if not history:
+        return []
+    msgs: list[dict[str, str]] = []
+    for m in history[-HISTORY_MAX_MSGS:]:
+        role = (m.get("role") or "").strip()
+        content = str(m.get("content") or "").strip()
+        if role not in ("user", "assistant") or not content:
+            continue
+        msgs.append({"role": role, "content": content[:HISTORY_MSG_CHARS]})
+    return msgs

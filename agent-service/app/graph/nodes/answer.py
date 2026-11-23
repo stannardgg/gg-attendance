@@ -12,7 +12,7 @@ import re
 from typing import Any
 
 from app.config import settings
-from app.graph.common import ratio
+from app.graph.common import llm_history_messages, ratio
 from app.graph.nodes.planner import guide_text
 from app.graph.state import AgentState
 from app.llm.client import LlmUnavailable, chat
@@ -37,7 +37,7 @@ def answer(state: AgentState) -> dict:
         return {}
 
     if state.get("intent") == "chitchat":
-        return {"answer": _chitchat_reply(state.get("query") or "")}
+        return {"answer": _chitchat_reply(state)}
 
     results = state.get("tool_results") or []
     if not results:
@@ -57,27 +57,35 @@ def answer(state: AgentState) -> dict:
     return {"answer": f"{text}\n\n{footer}".strip()}
 
 
-def _chitchat_reply(text: str) -> str:
+def _chitchat_reply(state: AgentState) -> str:
     """寒暄/问用法：有模型时自然作答，没模型时回落固定引导（§11.8 降级语义不变）。
 
     无论走不走模型，回答都要落到"能问什么"——引导文案是产品行为的一部分，
     模型的自我介绍只是包装，不能把用户引向工具清单之外的能力。
+    带上对话记忆：用户接着上一轮说「好的」「那你说说你能干嘛」时，
+    模型要知道「刚才」发生过什么，而不是把这句当成凭空冒出的问候。
     """
-    text = (text or "").strip()
+    text = (state.get("query") or "").strip()
     if _ACK.match(text):
         return "好的。想查数据可以直接说，比如「张三今天签到了吗」「计算机 2 班这周出勤率」。"
     if not settings.llm_enabled:
         return guide_text()
+    messages: list[dict[str, Any]] = [
+        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "system", "content":
+            "用户在寒暄、闲聊或询问你的能力。本轮没有调用任何工具：不要输出「数据来源」行，"
+            "也不要给出任何考勤数字。用两三句话自然回应；跑题的话题礼貌说明你只处理"
+            "签到、考勤、班级课程相关的事。最后附上这些标准问法，引导用户下一步：\n"
+            + guide_text()},
+    ]
+    history = llm_history_messages(state.get("history"))
+    if history:
+        messages.append({"role": "system", "content":
+            "以下是本轮之前的对话记录（旧→新，单条可能被截断），供你衔接上下文。"})
+        messages.extend(history)
+    messages.append({"role": "user", "content": text})
     try:
-        reply = chat([
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "system", "content":
-                "用户在寒暄、闲聊或询问你的能力。本轮没有调用任何工具：不要输出「数据来源」行，"
-                "也不要给出任何考勤数字。用两三句话自然回应；跑题的话题礼貌说明你只处理"
-                "签到、考勤、班级课程相关的事。最后附上这些标准问法，引导用户下一步：\n"
-                + guide_text()},
-            {"role": "user", "content": text},
-        ])
+        reply = chat(messages)
         return reply.content.strip() or guide_text()
     except LlmUnavailable as exc:
         log.info("llm-chitchat-skipped %s", exc)
