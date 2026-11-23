@@ -477,6 +477,16 @@ components:
           properties:
             classIds: { type: array, items: { type: integer, format: int64 } }
             courseIds: { type: array, items: { type: integer, format: int64 } }
+        identity:
+          type: object
+          nullable: true
+          description: |
+            当前登录用户身份（每轮现算，不是界面登录时的快照）。
+            教师身份下 Agent 据此把 create/update 班级、课程的 ownerTeacherId 落为本人；
+            管理员身份下 ownerTeacherId 必须由用户显式提供教师 ID。
+          properties:
+            teacherId: { type: integer, format: int64, nullable: true }
+            role: { type: string, nullable: true, description: TEACHER / ADMIN }
         tools: { type: array, items: { $ref: '#/components/schemas/ToolCatalogItem' } }
 
     ToolCatalogResp:

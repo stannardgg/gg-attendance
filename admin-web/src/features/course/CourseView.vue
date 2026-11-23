@@ -251,6 +251,9 @@ onMounted(() => {
           <el-select v-model="form.ownerTeacherId" clearable placeholder="可空" style="width: 100%">
             <el-option v-for="t in teachers" :key="t.id" :label="`${t.name}（${t.teacherNo}）`" :value="t.id" />
           </el-select>
+          <div class="field-tip">
+            仅作归属标注，不等于数据授权；教师能否看到本课程由「教师管理 → 授权范围」决定
+          </div>
         </el-form-item>
         <el-form-item label="备注">
           <el-input v-model="form.remark" type="textarea" :rows="2" maxlength="255" />
@@ -271,6 +274,13 @@ onMounted(() => {
   gap: 10px;
   margin-bottom: 12px;
   flex-wrap: wrap;
+}
+.field-tip {
+  width: 100%;
+  font-size: 12px;
+  color: #909399;
+  line-height: 1.5;
+  padding-top: 2px;
 }
 :deep(.hl) {
   background: #ecf5ff !important;
