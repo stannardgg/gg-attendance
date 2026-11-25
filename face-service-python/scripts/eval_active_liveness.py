@@ -16,10 +16,10 @@
        投影变换造不出这个信号，所以必须用数据集里的真实侧脸；
      - 照片歪着拿（整帧 ±10/15/20° 滚转）：量化平面滚转对 TURN_* 的残余风险
        （CR-021 已知限制：±15° 漂移 mean 0.030 / max 0.108，距阈值 0.12 仅 1σ）；
-     - print-static 负例：静态照片（恒定帧）—— EYE_CLOSE/TURN_*/MOVE_* 应全部拒。
+     - print-static 负例：静态照片（恒定帧）—— TURN_*/MOVE_* 应全部拒。
 
    ⚠️ 边界（报告内固定声明）：代理不过翻拍通道，检出质量按干净帧计 → 组件级
-   APCER 是**上限估计**；EYE_CLOSE 无信号通道只有静态负例；replay-video 与
+   APCER 是**上限估计**；replay-video 与
    全部 BPCER 必须真机采集后走 `--real`。
 
 2. `--real <攻击根目录> <真人根目录>`：真机采集落盘评测（权威口径）。
@@ -63,7 +63,9 @@ from app.engine import (detector, embedder, load_all,     # noqa: E402
                         liveness, landmarker, optional_status)
 from app.index.vectors import index                       # noqa: E402
 
-ACTIONS = ("MOVE_CLOSER", "MOVE_AWAY", "EYE_CLOSE", "TURN_LEFT", "TURN_RIGHT")
+# CR-029：EYE_CLOSE 已停用（契约 actions.json 1.4.0），评估池收窄为 4 动作；
+# --proxy 素材目录若仍含 EYE_CLOSE 子目录会按「未知动作」跳过并告警。
+ACTIONS = ("MOVE_CLOSER", "MOVE_AWAY", "TURN_LEFT", "TURN_RIGHT")
 FPS_NOTE = "帧序列按 ~3fps 服务端消化率设计：静止 3 帧 + 动作保持 5 帧（≥1s，hold=2 可达）"
 
 # ---------------------------------------------------------------- 打桩与存储
@@ -432,7 +434,7 @@ def write_report(mode: str, meta: dict, runs: list[dict], out_dir: str) -> str:
     if mode == "proxy":
         L += [
             "> **口径声明（协议 §8）**：代理素材不过翻拍通道，检出质量按干净帧计 →",
-            "> 组件级 APCER 是**上限估计**。EYE_CLOSE 无信号通道（只有静态负例）、",
+            "> 组件级 APCER 是**上限估计**；",
             "> replay-video 与全部 BPCER 必须真机采集后用 `--real` 复测。本报告不替代真机验收。",
             ""]
     if attacks:
