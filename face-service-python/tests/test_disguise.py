@@ -44,10 +44,15 @@ def service():
 
 
 # ---- 合成对齐空间的"皮肤/布料"素材 ----
-# 判据的肤色区间（disguise._skin_ratio）：Y>50, Cr∈[70,135], Cb∈[125,180]。
+# 判据的肤色区间（disguise._skin_ratio）：Y>50, Cr(idx1)∈[125,180], Cb(idx2)∈[70,135]。
+# ★ cv2.COLOR_BGR2YCrCb 输出顺序是 [Y, Cr, Cb]（2026-11-23 真机误报事故修正）。
 # 构造时直接在 YCrCb 上取值再转 BGR，保证 evaluate 转回去后落点一致。
-SKIN_YCC = (160, 100, 150)          # 肤色：Cr=100 ∈[70,135]，Cb=150 ∈[125,180]
-FABRIC_YCC = (150, 40, 200)         # 布料：Cr=40（区间外）——白色口罩的低色度物理特征
+SKIN_YCC = (160, 150, 100)          # 肤色：Cr=150 ∈[125,180]，Cb=100 ∈[70,135]
+FABRIC_YCC = (150, 40, 200)         # 布料：Cr=40 远低于 125（彩色织物）；
+                                    # 中性灰白织物 Cr≈Cb≈128 是判据盲区（匹配门禁兜底）
+
+# 真机实测肤色锚点（2026-11-23 sid=236 误报事故的 diag 数据，修正判据必须放行）：
+REAL_SKIN_YCC = (105, 156, 105)     # Y≈105, Cr≈156, Cb≈105（Mac 前置摄像头室内光）
 
 
 def _bgr(ycc_tuple: tuple, shape: tuple, noise: float = 0.0,
@@ -114,6 +119,20 @@ def test_clean_face_no_hit():
     assert by_kind["mask"].value > 0.3          # 肤色占比（阈值 0.10）
     assert by_kind["glasses"].value > 25        # 眼框 std（阈值 15）
     assert by_kind["hat"].value > 30            # 额头带 std（阈值 16）
+
+
+def test_real_webcam_skin_no_hit():
+    """真机肤色（事故 diag 实测锚点）必须放行——通道装反回归钉。
+
+    2026-11-23 事故：区间挂反时同一 chroma 得分 0.006~0.015 → 全量误报
+    FA-4009。此用例以当次 diag 数据为锚，防止以后有人再动通道顺序。
+    """
+    eye_rect, mouth_rect = _fake_rects()
+    img = _bgr(REAL_SKIN_YCC, (192, 192), noise=2.0)
+    crits = disguise.evaluate(img, eye_rect, mouth_rect)
+    by_kind = {c.kind: c for c in crits}
+    assert "mask" not in disguise.hits(crits)
+    assert by_kind["mask"].value is not None and by_kind["mask"].value > 0.8
 
 
 def test_mask_hit_by_skin():

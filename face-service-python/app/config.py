@@ -134,6 +134,9 @@ class DisguiseConfig:
     eye_rel_max: float = field(default_factory=lambda: _get_float("DISGUISE_EYE_REL_MAX", 0.50))
     # 额头带灰度 std 上限（干净额头 min 36.3，平布代理 ≤ 24.6）。
     forehead_std_max: float = field(default_factory=lambda: _get_float("DISGUISE_FOREHEAD_STD_MAX", 16))
+    # CR-025 运营取证：基线判据命中时把原始帧 JPEG 落盘到该目录（默认关）。
+    # 与 disguise baseline 日志的 diag 通道统计配套，用于离线复核误报真因。
+    dump_dir: str = field(default_factory=lambda: _get("DISGUISE_DUMP_DIR", ""))
     # 连续遮挡中止帧数（frame 路径，与 no_face/multi_face 同构）。
     occl_frames: int = field(default_factory=lambda: _get_int("DISGUISE_OCCL_FRAMES", 3))
     # finish 门禁：遮挡帧占比上限（occl_total / 有脸帧数）。
