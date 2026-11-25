@@ -26,7 +26,7 @@
 - 不缓存人脸帧到本地存储。
 
 ## 技术栈
-
+前端渲染
 Vue 3 + Vite + TypeScript + Vant 4。`getUserMedia` 强制 HTTPS（开发期用 mkcert）。
 
 ## 对应文档

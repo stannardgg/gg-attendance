@@ -63,3 +63,6 @@ workbuddy-checkin/
 # WorkBuddy 工作区文件
 *.genie
 .wbapp_*.genie
+
+# 文档流水线/工具工作产物（stage 中间态、trace、本地报告）
+output/
