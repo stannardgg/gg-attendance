@@ -29,14 +29,16 @@ SCALE_ACTIONS = ("MOVE_CLOSER", "MOVE_AWAY")
 TURN_ACTIONS = ("TURN_LEFT", "TURN_RIGHT")
 # 转向：+1 = 向左（偏航代理增大）。符号来源见 action.yaw_proxy 的说明。
 TURN_DIRECTIONS = {"TURN_LEFT": 1, "TURN_RIGHT": -1}
-# 闭眼（CR-021）：判据是眼框暗像素占比下降
+# 闭眼（CR-021）：判据是眼框暗像素占比下降。CR-029 起停用（不再抽签、不收
+# hint），判据保留供回滚与存量 challenge 判定。
 EYE_ACTIONS = ("EYE_CLOSE",)
 # 不依赖任何基线的动作（只有已停用的嘴部动作属于这一类，回滚时才会出现在白名单里）。
 # start 用它决定「基线无脸」到底该拒绝还是降级。
 BASELINE_FREE_ACTIONS = ("MOUTH_ONCE", "MOUTH_TWICE")
 
-# CR-018：MOUTH_* 已停用（不再抽签、不接受 hint）。这两张表保留四个键，
-# 一是回滚只需改 FA_ACTION_WHITELIST，二是 Redis 里未过期的存量 challenge 仍能反序列化。
+# CR-018：MOUTH_* 已停用（不再抽签、不接受 hint）。CR-029：EYE_CLOSE 同样停用。
+# 这些表保留全部键，一是回滚只需改 FA_ACTION_WHITELIST，二是 Redis 里未过期的
+# 存量 challenge 仍能反序列化、跑完剩余窗口。
 ACTION_WINDOW = {
     "MOUTH_ONCE": settings.action.window_ms_once,
     "MOUTH_TWICE": settings.action.window_ms_twice,
@@ -48,6 +50,7 @@ ACTION_WINDOW = {
 }
 
 # 每个动作要完成几次。靠近/离远/闭眼/转头做一次就够——「连续靠近两次」没有物理意义。
+# （闭眼已停用，仅回滚时生效。）
 ACTION_NEED = {
     "MOUTH_ONCE": 1,
     "MOUTH_TWICE": 2,

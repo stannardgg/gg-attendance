@@ -20,7 +20,7 @@ contracts/
 ├─ enums/
 │  ├─ roles.json         # ADMIN / TEACHER / STUDENT
 │  ├─ statuses.json      # 9 组状态机 + rejectGate 小写归因标签
-│  ├─ actions.json       # 5 个启用动作（靠近/离远/闭眼/左转/右转）+ 停用动作及原因（含张嘴族、眨眼）
+│  ├─ actions.json       # 4 个启用动作（靠近/离远/左转/右转）+ 停用动作及原因（含张嘴族、闭眼、眨眼）
 │  └─ error-codes.json   # 35 个错误码，含 HTTP 状态与领域
 └─ scripts/
    ├─ check-contract.sh       # 扫 information_schema，拦 course.class_id 等
@@ -52,7 +52,7 @@ CI 的 `契约校验` job 会自动跑这两组，任何一次改动都要过。
 |---|---|---|
 | **班级与课程解耦** | `course` 无 `class_id`；`class_group` 无 `course_id`；不建 `course_student` | `check-contract.sh` |
 | **课程 DTO 不得带 classId** | 请求体 `additionalProperties: false`，服务端未知字段校验 | `java-api.yaml` 的 `CourseCreateReq` |
-| 动作码 | 只用 `actions.json` 里 `enabled` 的 5 个：`MOVE_CLOSER` / `MOVE_AWAY` / `EYE_CLOSE` / `TURN_LEFT` / `TURN_RIGHT`（CR-018 停用张嘴族、CR-021 用闭眼取代眨眼；存量 `action_seq` 仍可读） | `actions.json` + `check-agent-tools.py` |
+| 动作码 | 只用 `actions.json` 里 `enabled` 的 4 个：`MOVE_CLOSER` / `MOVE_AWAY` / `TURN_LEFT` / `TURN_RIGHT`（CR-018 停用张嘴族、CR-029 停用闭眼 `EYE_CLOSE`；存量 `action_seq` 仍可读） | `actions.json` + `check-agent-tools.py` |
 | 基线帧字段 | 统一 `baselineFrame`（Base64），响应含 `baselineDegraded` | `face-api.yaml` |
 | 会话 | 必须同时含 `class_id` 与 `course_id`，缺一 `FA-2001` | `V1__schema.sql` + `java-api.yaml` |
 | Agent 写接口 | 请求体 `{params, confirmToken?}`，响应含 `requiresConfirm`/`preview`/`confirmToken`/`expiresAt` | `internal.yaml` |

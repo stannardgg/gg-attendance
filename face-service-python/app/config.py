@@ -172,7 +172,8 @@ class ActionConfig:
     # 命中门槛的动作不参与随机（否则学生物理上做不到，判失败是我们的错）。
     scale_closer_max_frac: float = 0.80      # 人脸长边 / 画面高，超过则不做「靠近」
     scale_away_min_px: float = 70.0          # 缩 18% 后仍 ≥70px 才允许「离远」
-    # 闭眼（CR-021）：眼框暗像素占比相对基线下降。0.06 来自 80 个身份的实测
+    # 闭眼（CR-021，**已随 CR-029 停用**）：眼框暗像素占比相对基线下降。0.06 来自
+    # 80 个身份的实测
     # （`probe_action.py --eye`：闭眼降幅 0.178±0.065，静止抖动 std=0.0152 → 3.9σ；
     # 75/80 达标，未达标的 5 例里 1 例被下面的基线门槛挡在抽签之外）；
     # drop_ratio 再要求落到基线的 60% 以下，避免「本来就很暗的眼睛」靠绝对量过关。
@@ -217,12 +218,14 @@ class ActionConfig:
     # 新动作在真机标定完成前，运维可以不重建镜像就把它们摘下来。
     #
     # CR-018：嘴部动作（MOUTH_ONCE / MOUTH_TWICE）已整体停用（产品决定：签到不再
-    # 要求学生张嘴）。CR-021 增加闭眼与左右转头，白名单回到 5 个。
-    # 回滚嘴部动作只需把 MOUTH_* 加回本变量并重建 face 容器。
+    # 要求学生张嘴）。CR-021 增加闭眼与左右转头；CR-029 产品决定停用闭眼
+    # （EYE_CLOSE），白名单回到 4 个。
+    # 回滚嘴部/闭眼动作只需把对应码加回本变量并重建 face 容器；判据代码与
+    # 阈值都还在（见上面 MOUTH_* 与 eye_* 各字段）。
     action_whitelist: tuple = field(default_factory=lambda: tuple(
         s.strip() for s in _get(
             "ACTION_WHITELIST",
-            "MOVE_CLOSER,MOVE_AWAY,EYE_CLOSE,TURN_LEFT,TURN_RIGHT"
+            "MOVE_CLOSER,MOVE_AWAY,TURN_LEFT,TURN_RIGHT"
         ).split(",") if s.strip()))
     # CR-010：挑战动作允许由请求指定。**默认关闭**——动作随机是防预录视频的一道
     # 保险，让客户端能自选动作等于把这道保险交回给攻击者。只有验收/联调环境

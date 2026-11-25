@@ -168,7 +168,7 @@ services:
       FA_ALLOW_ACTION_HINT: ${ALLOW_ACTION_HINT:-0}
       # CR-021：动作白名单。靠近 / 离远 / 闭眼 / 左转 / 右转（张嘴已停用、眨眼已由闭眼取代）。
       # 灰度或真机标定时把某个码从 .env 的 ACTION_WHITELIST 里删掉，再重建容器。
-      FA_ACTION_WHITELIST: ${ACTION_WHITELIST:-MOVE_CLOSER,MOVE_AWAY,EYE_CLOSE,TURN_LEFT,TURN_RIGHT}
+      FA_ACTION_WHITELIST: ${ACTION_WHITELIST:-MOVE_CLOSER,MOVE_AWAY,TURN_LEFT,TURN_RIGHT}
       FA_MOVE_SCALE_DELTA: ${MOVE_SCALE_DELTA:-0.18}
       # 压测放宽挑战 TTL（默认 60 = 契约值）：单机 CPU 推理 30 路并发时 finish 排队
       # 会超过 60s，排队超时的挑战被 Redis 删掉（R3 容量问题）。生产留默认。
@@ -315,7 +315,7 @@ services:
       E2E_DATASET: /dataset
       E2E_OUT: /out
       # 与服务端同一个来源：e2e 的身份预检据此决定筛哪几族的合成素材
-      E2E_ACTION_WHITELIST: ${ACTION_WHITELIST:-MOVE_CLOSER,MOVE_AWAY,EYE_CLOSE,TURN_LEFT,TURN_RIGHT}
+      E2E_ACTION_WHITELIST: ${ACTION_WHITELIST:-MOVE_CLOSER,MOVE_AWAY,TURN_LEFT,TURN_RIGHT}
       PYTHONPATH: /e2e:/app
     volumes:
       - ../tests/e2e:/e2e:ro

@@ -170,13 +170,13 @@ def test_start_rejects_blank_baseline(service):
 
 
 def test_random_pick_only_whitelisted_actions(service, face_img):
-    """CR-018/021：抽样只出白名单里的动作，已停用的嘴部动作不得再被抽到。"""
+    """CR-018/021/029：抽样只出白名单里的动作，已停用的嘴部/闭眼动作不得再被抽到。"""
     base = composite(face_img)
     picked = set()
     for i in range(12):
         info = service.start(tickets.issue(1, 110 + i, f"jti-pick-{i}"), base)
         picked.add(info["action"])
-    assert picked <= {"MOVE_CLOSER", "MOVE_AWAY", "EYE_CLOSE",
+    assert picked <= {"MOVE_CLOSER", "MOVE_AWAY",
                       "TURN_LEFT", "TURN_RIGHT"}, picked
     assert picked, "12 次抽样至少应抽出一个动作"
 
@@ -255,9 +255,10 @@ def test_unknown_action_hint_rejected(service, face_img, monkeypatch):
                       action_hint="NOD")
 
 
-@pytest.mark.parametrize("retired", ["MOUTH_ONCE", "MOUTH_TWICE", "BLINK"])
+@pytest.mark.parametrize("retired", ["MOUTH_ONCE", "MOUTH_TWICE", "BLINK", "EYE_CLOSE"])
 def test_retired_action_hint_rejected(service, face_img, monkeypatch, retired):
-    """CR-018 停用的嘴部动作码、CR-021 被闭眼取代的 BLINK 都要给明确原因。
+    """CR-018 停用的嘴部动作码、CR-021 被闭眼取代的 BLINK、CR-029 停用的闭眼
+    本身，都要给明确原因。
 
     验收脚本最容易踩这个坑：以为 hint 写错，去翻白名单和环境变量。
     """
@@ -268,7 +269,8 @@ def test_retired_action_hint_rejected(service, face_img, monkeypatch, retired):
                       action_hint=retired)
 
 
-# ---------------- CR-021：闭眼 / 左右转头 ----------------
+# ---------------- CR-021：闭眼 / 左右转头（闭眼已随 CR-029 停用，
+# ---------------- 判据代码保留供回滚，以下用例钉住保留代码的行为） ----------------
 
 def test_eye_close_counter_counts_segment():
     from app.challenge.action import EyeCloseCounter
@@ -519,12 +521,10 @@ def test_eye_close_not_eligible_without_headroom(face_img):
 
 
 def test_new_action_instructions_and_windows(service, face_img, monkeypatch):
-    """文案与窗口是契约的一部分：闭眼不是眨眼、转头要报方向。"""
+    """文案与窗口是契约的一部分：转头要报方向、窗口与采样率对齐。"""
     from app.config import settings
     monkeypatch.setattr(settings.action, "allow_action_hint", True)
     base = composite(face_img)
-    eye = service.start(tickets.issue(1, 130, "jti-eye"), base, action_hint="EYE_CLOSE")
-    assert "闭" in eye["instruction"] and eye["windowMs"] == 3000
     right = service.start(tickets.issue(1, 131, "jti-turn"), base, action_hint="TURN_RIGHT")
     # 2026-11-22 真机采样修正：转头窗口与尺度类对齐 3s，文案改「保持约 1 秒」
     # （0.5s < 服务端 ~0.8s 帧距，按旧文案做会一帧都不落窗）

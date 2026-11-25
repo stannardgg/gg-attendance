@@ -28,6 +28,17 @@
   join：未达上限续票进采集，已锁死当场显示 FA-3005 文案与申诉入口；
   锁死状态权威计数在 `checkin_attempt` 表，刷新多少次结果一致。
 
+### Removed
+- **动作库停用「闭眼约 1 秒」（EYE_CLOSE，CR-029）**：产品决定签到不再要求
+  学生闭眼，动作库回到 4 个（靠近/离远/左转/右转）。白名单默认值、契约
+  actions.json（版本 1.3.1 → 1.4.0，`EYE_CLOSE` 移入 disabled）、
+  face-api.yaml 枚举、移动端 `FaceAction` 类型与 action_count 失败文案
+  同步收窄；已停用动作 hint 返回 `FA-9001`「动作已停用」（无论
+  ALLOW_ACTION_HINT 开关）。判据代码与阈值保留供回滚（改 ACTION_WHITELIST
+  + 重建 face 容器），存量 challenge 可按原判据跑完剩余窗口；e2e 场景 19
+  改为「已停用动作 hint 被拒」、场景 20 移除。防预录随机性 5 选 1 →
+  4 选 1，活体与身份一致性门禁不变。
+
 ## [1.5.0] - 2026-11-23
 
 ### Added

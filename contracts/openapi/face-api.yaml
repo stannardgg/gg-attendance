@@ -300,12 +300,12 @@ components:
         deviceHash: { type: string, maxLength: 64 }
         action:
           type: string
-          enum: [MOVE_CLOSER, MOVE_AWAY, EYE_CLOSE, TURN_LEFT, TURN_RIGHT]
+          enum: [MOVE_CLOSER, MOVE_AWAY, TURN_LEFT, TURN_RIGHT]
           description: |
             指定动作，**仅当服务端开启 `FA_ALLOW_ACTION_HINT=1` 时生效**（CR-010）。
             正式环境忽略该字段——动作由服务端随机抽取，可自选等于把防预录的靶子交回给攻击者。
-            CR-018 起 `MOUTH_ONCE` / `MOUTH_TWICE` 已停用：传入已停用动作返回 `FA-9001`（动作已停用），
-            契约外动作码返回 `FA-2001`。
+            CR-018 起 `MOUTH_ONCE` / `MOUTH_TWICE` 已停用，CR-029 起 `EYE_CLOSE` 同样停用：
+            传入已停用动作返回 `FA-9001`（动作已停用），契约外动作码返回 `FA-2001`。
 
     ChallengeStartData:
       type: object
@@ -314,10 +314,11 @@ components:
         challengeId: { type: string, example: c_8f2a1b }
         action:
           type: string
-          enum: [MOVE_CLOSER, MOVE_AWAY, EYE_CLOSE, TURN_LEFT, TURN_RIGHT]
+          enum: [MOVE_CLOSER, MOVE_AWAY, TURN_LEFT, TURN_RIGHT]
           description: |
-            白名单见 contracts/enums/actions.json，判据分三类：检测框尺度（`MOVE_*`）、
-            眼框暗度下降（`EYE_CLOSE`）、SCRFD 5 点偏航代理（`TURN_*`）。全部相对基线判定。
+            白名单见 contracts/enums/actions.json，判据分两类：检测框尺度（`MOVE_*`）、
+            SCRFD 5 点偏航代理（`TURN_*`）。全部相对基线判定。
+            （CR-021 曾有眼框暗度判据 `EYE_CLOSE`，CR-029 停用，判据代码保留供回滚。）
         instruction: { type: string, example: 请把脸靠近摄像头一点，保持半秒 }
         windowMs: { type: integer, example: 2500 }
         minFrames: { type: integer, example: 8 }

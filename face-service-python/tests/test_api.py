@@ -121,6 +121,23 @@ def test_start_without_ticket(client, face_img):
     assert r.json()["code"] == "FA-1002"
 
 
+def test_retired_action_hint_rejected_api(client, face_img):
+    """CR-029：HTTP 层也要把「已停用」讲清楚，e2e 场景 19 断言的就是这条路径。
+
+    与白名单外的未知码不同：停用码无论 FA_ALLOW_ACTION_HINT 开关都拒绝，
+    且消息必须含「已停用」——联调脚本按这句话去翻 CR，而不是查拼写。
+    """
+    ticket = tickets.issue(1, 203, "jti-retired-api")
+    r = client.post("/face-api/challenge/start",
+                    json={"baselineFrame": b64(composite(face_img)),
+                          "action": "EYE_CLOSE"},
+                    headers={"Authorization": f"Bearer {ticket}"})
+    assert r.status_code == 400
+    body = r.json()
+    assert body["code"] == "FA-9001"
+    assert "已停用" in body["message"]
+
+
 def test_multi_worker_shared_state(client, face_img):
     """跨进程语义：换一个 service 实例（等价于换 worker），状态不丢。"""
     import fakeredis
