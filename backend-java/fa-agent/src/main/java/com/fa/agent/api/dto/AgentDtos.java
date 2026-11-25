@@ -5,6 +5,7 @@ import java.util.List;
 import java.util.Map;
 
 /**
+ * 封装agent对象
  * Agent 工具端点的请求/响应结构。字段逐字对齐
  * {@code contracts/openapi/internal.yaml}（ToolCatalogItem / AgentToolReq / AgentToolData）。
  *
