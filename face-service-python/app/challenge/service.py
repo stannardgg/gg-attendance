@@ -13,7 +13,9 @@
 from __future__ import annotations
 
 import logging
+import os
 import random
+import time
 
 import cv2
 import numpy as np
@@ -152,6 +154,25 @@ class ChallengeService:
                 _crits = _disguise.evaluate(crop, eye_roi, tuple(roi))
                 _found = _disguise.hits(_crits)
                 if _found:
+                    # 误报取证：start 拒绝此前零日志（学生截图是唯一线索）。
+                    # crits 给出「哪个判据、差多少」，diag 回答光照/胡须/真遮挡
+                    # 三类假设，运营据此决定是调区间还是调区域（CR-025）。
+                    # dump_dir 开启时把前端发来的原始基线 JPEG 落盘——通道统计
+                    # 分不开「极端偏色光源」与「换序」，看图一眼定案。默认关。
+                    if settings.disguise.dump_dir:
+                        try:
+                            os.makedirs(settings.disguise.dump_dir, exist_ok=True)
+                            cv2.imwrite(os.path.join(
+                                settings.disguise.dump_dir,
+                                f"baseline_sid{session_id}_stu{student_id}_"
+                                f"{int(time.time())}.jpg"), baseline_bgr)
+                        except OSError:
+                            pass  # 取证失败不影响拒绝路径
+                    logger.warning(
+                        "disguise baseline sid=%s student=%s kinds=%s crits=%s diag=%s",
+                        session_id, student_id, _found,
+                        [c.to_dict() for c in _crits],
+                        _disguise.diagnose(crop, eye_roi, tuple(roi)))
                     raise DisguiseError(
                         f"检测到面部遮挡（{disguise_kind_text(_found)}），{disguise_advice(_found)}")
 
@@ -359,11 +380,23 @@ class ChallengeService:
                 for _k in _found:
                     if _k not in st.occl_kinds:
                         st.occl_kinds.append(_k)
+                # 命中帧取证：干净脸误报通常只发生几帧，逐帧记录值与通道统计，
+                # 才能回答「是光线漂进来还是区域挪出去了」。
+                logger.info(
+                    "disguise frame cid=%s sid=%s student=%s kinds=%s run=%d crits=%s diag=%s",
+                    challenge_id, st.session_id, st.student_id, _found, st.occl_run,
+                    [c.to_dict() for c in _crits],
+                    _disguise.diagnose(
+                        aligned, st.eye_roi, (st.roi_x1, st.roi_y1, st.roi_x2, st.roi_y2)))
                 if st.occl_run >= settings.disguise.occl_frames:
                     st.closed = True
                     st.seq += 1            # 帧已消费，推进 seq（与 multi_face 同构）
                     self.store.save(st)
                     self._record_failure(st, "disguise")
+                    logger.warning(
+                        "disguise abort cid=%s sid=%s student=%s kinds=%s run=%d total=%d",
+                        challenge_id, st.session_id, st.student_id, st.occl_kinds,
+                        st.occl_run, st.occl_total)
                     raise DisguiseError(
                         f"检测到面部遮挡（{disguise_kind_text(st.occl_kinds)}），"
                         f"{disguise_advice(st.occl_kinds)}")
@@ -552,9 +585,11 @@ class ChallengeService:
         # 不记这一行的话「签到失败」在现场完全无法归因（只能靠帧耗时反推）。
         logger.info(
             "challenge finish cid=%s sid=%s student=%s action=%s passed=%s reject=%s "
-            "frames=%d detected=%d/%d gates=%s",
+            "frames=%d detected=%d/%d matched=%s sim=%s top2=%s gates=%s",
             challenge_id, st.session_id, st.student_id, st.action, result["passed"],
             result["rejectGate"], result["frames"], detected, st.need,
+            sid, None if sim is None else round(float(sim), 4),
+            None if top2 is None else round(float(top2), 4),
             {k: (None if v.value is None else round(float(v.value), 3))
              for k, v in all_gates.items()},
         )

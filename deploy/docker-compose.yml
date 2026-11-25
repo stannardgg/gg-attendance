@@ -185,6 +185,8 @@ services:
       FA_MOUTH_HOLD_FRAMES: ${MOUTH_HOLD_FRAMES:-2}
       FA_SYNC_ENABLED: "1"
       FA_SYNC_INTERVAL: ${VECTOR_SYNC_INTERVAL:-60}
+      # CR-025 误报取证：基线判据命中时把原始帧落盘（默认空 = 关）。
+      FA_DISGUISE_DUMP_DIR: ${FA_DISGUISE_DUMP_DIR:-}
     depends_on:
       redis:
         condition: service_healthy
