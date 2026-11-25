@@ -33,7 +33,7 @@ OUT_DIR = os.environ.get("E2E_OUT", "/out")
 ACTION_WHITELIST = tuple(
     a.strip() for a in os.environ.get(
         "E2E_ACTION_WHITELIST",
-        "MOVE_CLOSER,MOVE_AWAY,EYE_CLOSE,TURN_LEFT,TURN_RIGHT").split(",")
+        "MOVE_CLOSER,MOVE_AWAY,TURN_LEFT,TURN_RIGHT").split(",")
     if a.strip())
 MOUTH_ACTIONS = {"MOUTH_ONCE", "MOUTH_TWICE"}
 

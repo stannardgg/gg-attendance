@@ -114,9 +114,9 @@ export interface Appeal {
 
 export type Gate = 'liveness' | 'identity' | 'action_count' | 'multi_face' | 'no_face' | 'match'
 
-// CR-018：嘴部动作已停用，服务端只会下发这两个（历史 action_seq 另按 string 处理）
+// CR-018 停用嘴部动作、CR-029 停用闭眼，服务端只会下发这四个（历史 action_seq 另按 string 处理）
 export type FaceAction =
-  | 'MOVE_CLOSER' | 'MOVE_AWAY' | 'EYE_CLOSE' | 'TURN_LEFT' | 'TURN_RIGHT'
+  | 'MOVE_CLOSER' | 'MOVE_AWAY' | 'TURN_LEFT' | 'TURN_RIGHT'
 
 export interface ChallengeStartData {
   challengeId: string

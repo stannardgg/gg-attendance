@@ -388,9 +388,10 @@ components:
         actionSeq:
           type: string
           description: |
-            本次签到要求的动作码。当前是 `MOVE_CLOSER` / `MOVE_AWAY` / `EYE_CLOSE` /
-            `TURN_LEFT` / `TURN_RIGHT`（CR-018 停用了 `MOUTH_ONCE` / `MOUTH_TWICE`）。
-            这里**故意不写枚举**：存量 `attendance.action_seq` 里仍有历史嘴部动作，
+            本次签到要求的动作码。当前是 `MOVE_CLOSER` / `MOVE_AWAY` /
+            `TURN_LEFT` / `TURN_RIGHT`（CR-018 停用了 `MOUTH_ONCE` / `MOUTH_TWICE`，
+            CR-029 停用了 `EYE_CLOSE`）。
+            这里**故意不写枚举**：存量 `attendance.action_seq` 里仍有历史嘴部/闭眼动作，
             契约收窄不该把已发生的合法数据变成非法值。
 
         actionCount: { type: integer, minimum: 0, maximum: 5 }

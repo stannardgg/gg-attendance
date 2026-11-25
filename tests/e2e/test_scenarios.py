@@ -25,9 +25,9 @@ def do_checkin(world, key: str, sid: int, *, action: str | None = None,
                frames=None, baseline=None):
     """进入签到 → 拿票据 → 开始挑战 → 逐帧 → finish。返回 finish 的 data。
 
-    造帧按 action 自动匹配：MOVE_CLOSER / MOVE_AWAY 用尺度序列，EYE_CLOSE 用
-    「闭一下再睁开」序列，转头与 **未指定 action**（交给服务端随机）都用静止帧
-    —— 合成素材造不出真实偏航，而随机动作下的"没做动作"就是静止不动。
+    造帧按 action 自动匹配：MOVE_CLOSER / MOVE_AWAY 用尺度序列，转头与
+    **未指定 action**（交给服务端随机）都用静止帧—— 合成素材造不出真实偏航，
+    而随机动作下的"没做动作"就是静止不动。EYE_CLOSE 分支保留供白名单回滚。
     """
     st = world.students[key]
     j = flows.join(st["client"], sid)
@@ -404,28 +404,22 @@ def test_07_照片翻拍被拒(world):
 
 # ---------------------------------------------------------------- CR-021 新增场景
 
-def test_19_闭眼保持判通过(world):
-    """要求 EYE_CLOSE：闭眼 4 帧（≥2 帧 hold）→ 判通过。
+def test_19_已停用动作hint被拒(world):
+    """要求已停用的 EYE_CLOSE（CR-029）→ start 直接拒绝（FA-9001），挑战不开。
 
-    这条同时验证「眼框在 192 空间锁定、跨帧复用」是对的：合成闭眼涂的就是
-    服务端量到的那块区域，如果 ROI 漂了，暗度降幅就出不来。
+    CR-021 时这里是「闭眼保持判通过」的正例；CR-029 产品决定停用闭眼动作后，
+    联调/验收脚本若仍按旧契约 hint 该码，必须拿到明确的服务端拒绝——
+    消息说「已停用」，而不是模糊的"未知动作码"或更糟的静默随机动作。
     """
     s = flows.start_session(world.teacher, world.class_id, world.course_id, "场景19")
     res = do_checkin(world, "s2", s["id"], action="EYE_CLOSE")
-    assert res["action"] == "EYE_CLOSE", res
-    assert res.get("passed") is True, res
-    assert res["detectedAction"] == 1, res
+    assert res.get("startError") == 400, res
+    assert res["code"] == "FA-9001", res
+    assert "已停用" in res["message"], res
+    flows.assert_no_attendance(world.students["s2"]["client"], s["id"])
 
-
-def test_20_要求闭眼但一直睁眼(world):
-    """要求 EYE_CLOSE 但全程睁眼 → FA-4003，数值回传 0/1。"""
-    s = flows.start_session(world.teacher, world.class_id, world.course_id, "场景20")
-    base, frames, _ = flows.checkin_frames_static(world.students["s2"]["person"], n=10)
-    res = do_checkin(world, "s2", s["id"], action="EYE_CLOSE",
-                     frames=frames, baseline=base)
-    assert res["passed"] is False and res["rejectGate"] == "actionCount", res
-    gate = res["gates"]["actionCount"]
-    assert gate["value"] == 0 and gate["threshold"] == 1, gate
+# 场景 20（要求闭眼但一直睁眼 → FA-4003）随 CR-029 停用闭眼移除：闭眼动作
+# 不再下发，这个负例失去了可复现的入口。FA-4003 语义由场景 21（转头不动）继续覆盖。
 
 
 def test_21_要求转头但没动(world):

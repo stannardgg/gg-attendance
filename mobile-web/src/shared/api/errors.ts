@@ -49,7 +49,7 @@ export const ERROR_MESSAGES: Record<string, string> = {
 export const GATE_ADVICE: Record<string, string> = {
   liveness: '请正对镜头、保证光线充足，按提示完成动作，不要用照片或视频对着镜头。',
   identity: '画面里只有你本人吗？请正对镜头、把脸放进取景框中央再试一次。',
-  action_count: '动作没被识别到。请把手机拿稳，在规定时间内按提示做完整：靠近/离远、闭眼约 1 秒、或向左/向右转头约 20 度。',
+  action_count: '动作没被识别到。请把手机拿稳，在规定时间内按提示做完整：靠近/离远，或向左/向右转头约 20 度。',
   multi_face: '画面里出现了不止一个人，请找一个人少的地方单独完成签到。',
   no_face: '没有检测到人脸。请把脸放进取景框，避免逆光和遮挡。',
   passive: '疑似屏幕翻拍。请本人正对摄像头完成签到，不要用照片或另一台设备的屏幕对着镜头。',
