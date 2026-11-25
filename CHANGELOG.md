@@ -5,7 +5,7 @@
 
 批次完成标记（`batch-N-done`）与版本 tag 是两套，不写入本文件；本文件只记**可交付版本**。
 
-## [Unreleased]
+## [1.5.2] - 2026-11-25
 
 ### Fixed
 - **CR-025 口罩判据 YCrCb 通道挂反导致真机全量误报（FA-4009「请摘下口罩」）**：
@@ -22,6 +22,8 @@
   三类假设的通道统计，baseline 命中与 frame 中止路径落结构化日志；
   `FA_DISGUISE_DUMP_DIR` 可将基线原始帧落盘（默认关）；finish 日志补
   `matched/sim/top2`，遮挡误报不再只能靠帧耗时反推。
+- **CHANGELOG 1.5.1 段落去重**：「动作库停用闭眼（EYE_CLOSE，CR-029）」条目
+  在 PR #35 合并时重复了一份，恢复为单份（条目内容不变）。
 
 ## [1.5.1] - 2026-11-25
 
@@ -50,17 +52,6 @@
   引言；agent-service `common.py` 与 `AgentDtos.java` 注释补充。Batch 调度台
   行为准则 `agent.md` 使命完成移出仓库；新增 `docs/面试模拟-20问与参考答案.md`；
   `output/` 文档流水线工作产物加入 `.gitignore`。
-
-### Removed
-- **动作库停用「闭眼约 1 秒」（EYE_CLOSE，CR-029）**：产品决定签到不再要求
-  学生闭眼，动作库回到 4 个（靠近/离远/左转/右转）。白名单默认值、契约
-  actions.json（版本 1.3.1 → 1.4.0，`EYE_CLOSE` 移入 disabled）、
-  face-api.yaml 枚举、移动端 `FaceAction` 类型与 action_count 失败文案
-  同步收窄；已停用动作 hint 返回 `FA-9001`「动作已停用」（无论
-  ALLOW_ACTION_HINT 开关）。判据代码与阈值保留供回滚（改 ACTION_WHITELIST
-  + 重建 face 容器），存量 challenge 可按原判据跑完剩余窗口；e2e 场景 19
-  改为「已停用动作 hint 被拒」、场景 20 移除。防预录随机性 5 选 1 →
-  4 选 1，活体与身份一致性门禁不变。
 
 ### Removed
 - **动作库停用「闭眼约 1 秒」（EYE_CLOSE，CR-029）**：产品决定签到不再要求
