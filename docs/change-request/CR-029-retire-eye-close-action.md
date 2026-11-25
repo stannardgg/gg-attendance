@@ -95,10 +95,11 @@ hold=2 于 2026-11-22 恢复），**停的是交互要求，不是可测性结�
    1/4。活体与首末帧身份一致性仍是主防线，三道 AND 语义未变。
 2. **眼框暗度判据的端到端覆盖归零**。判据只剩单测（计数器/姿态闸/可做性），
    E2E 正负例均移除。回滚后若需回归，重跑 `probe_action.py --eye` 标定即可。
-3. **待同步项（未合并分支）**：`feat/cookie-login-lock` 上的
-   `scripts/eval_active_liveness.py` 的 `ACTIONS` 元组仍含 `EYE_CLOSE`，
-   `docs/verification/active-liveness-protocol.md` 同样提及——该分支合并时需
-   把闭眼从评测动作集中移除，否则对已停用动作发 hint 会在 start 阶段失败。
+3. **待同步项（已处理）**：`feat/cookie-login-lock` 分支独占的
+   `scripts/eval_active_liveness.py` 已同步收窄（251422f，2026-11-25）：`ACTIONS`
+   5→4，docstring 与报告脚注去掉闭眼条目；`baseline_eye` / `eye_dark_drop` /
+   `eye_hold_frames` 等判据参数不动。`docs/verification/active-liveness-protocol.md`
+   仍提及闭眼——它记录的是 2026-11-23 评估当时的事实，按历史口径保留。
 4. **项目文档 §4.4 / §16.3 补记**：并行会话正占用 `项目文档.md`（工作区有未提交
    改动），本 CR 落地后单独补记（同 CR-028 §6 先例）。
 
